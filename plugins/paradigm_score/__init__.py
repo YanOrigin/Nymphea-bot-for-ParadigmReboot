@@ -453,8 +453,8 @@ def _fetch_b50_sections(username: str, mode: str, fitting: bool) -> dict:
         avg15 = sum(_val(r) for r in top15) / max(1, len(top15)) / 100
         total = (sum(_val(r) for r in top35 + top15) / max(1, len(top35) + len(top15))) / 100
         sections = [
-            {"label": "Best 15", "avg": avg15, "records": top15},
             {"label": "Best 35", "avg": avg35, "records": top35},
+            {"label": "Best 15", "avg": avg15, "records": top15},
         ]
     return {"sections": sections, "total": total}
 
