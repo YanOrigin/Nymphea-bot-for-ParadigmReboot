@@ -197,7 +197,7 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
     f_cell_rating = _font(30)
 
     margin = 40
-    header_h = 132
+    header_h = 172
     sec_head_h = 78
     width = margin * 2 + COLS * CELL_W + (COLS - 1) * GAP
 
@@ -212,12 +212,13 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
 
     # ---- 头部：左上角查询时间 ----
     ts = query_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    draw.text((margin, 14), f"查询时间 {ts}", fill=TEXT_DIM, font=f_label)
-    draw.text((margin, 44), title, fill=TEXT, font=f_title)
-    draw.text((margin, 98), f"{nickname or username}  ·  {footer or 'Rating Report'}", fill=TEXT_DIM, font=f_sub)
-    draw.text((width - margin, 36), _fmt_rating2(total_rating), fill=ACCENT, font=f_big, anchor="ra")
-    draw.text((width - margin, 100), "TOTAL RATING", fill=TEXT_DIM, font=f_label, anchor="ra")
-    draw.line([(margin, header_h - 14), (width - margin, header_h - 14)], fill=(52, 58, 78), width=3)
+    draw.text((margin, 12), f"查询时间 {ts}", fill=TEXT_DIM, font=f_label)
+    draw.text((margin, 46), title, fill=TEXT, font=f_title)
+    draw.text((margin, 112), f"{nickname or username}  ·  {footer or 'Rating Report'}", fill=TEXT_DIM, font=f_sub)
+    draw.text((width - margin, 40), _fmt_rating2(total_rating), fill=ACCENT, font=f_big, anchor="ra")
+    draw.text((width - margin, 112), "TOTAL RATING", fill=TEXT_DIM, font=f_label, anchor="ra")
+    # 分隔线：位于昵称行下方（昵称 112 + 字高 36 = 148，留 24 余量）
+    draw.line([(margin, 172), (width - margin, 172)], fill=(52, 58, 78), width=3)
 
     # ---- 分节 ----
     y = header_h + margin // 2
