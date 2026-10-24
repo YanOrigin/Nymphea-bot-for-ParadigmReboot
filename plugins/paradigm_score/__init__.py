@@ -491,11 +491,13 @@ async def handle_b50(event: MessageEvent, arg: Message = CommandArg()):
     out = _SCORES_DIR / f"b50_{uid}_{mode}{'_fit' if fitting else ''}.jpg"
     title = f"Paradigm: Reboot B50{' · Fitted' if fitting else ''}"
     try:
+        _qt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         img_path = await core.b50_render.render_b50_image(
             prp["username"], prp.get("nickname") or prp["username"],
             sections, result["total"], title, out,
             footer=f"{mode_label}{fit_note} · PRP: {prp['username']}",
             fitting=fitting,
+            query_time=_qt,
         )
     except Exception as e:
         logger.exception("b50 render failed")
