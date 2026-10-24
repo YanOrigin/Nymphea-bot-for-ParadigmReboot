@@ -6,11 +6,11 @@
   2. 清两处 __pycache__
   3. 重启生产 bot（计划任务，无 UAC）
   4. 等待监听 + 健康检查 /ping
-  5. 校验进程内实际加载的模块源码含指定特征（可选断言）
+  5. 校验进程内实际加载的模块源码含指定特征（core 与插件层都查）
 
 用法：
-  python deploy.py                 # 仅部署
-  python deploy.py --expect query_time   # 部署并断言 core.b50_render 源码含 query_time
+  python deploy.py                      # 仅部署
+  python deploy.py --expect query_time  # 部署并断言模块源码含该特征
 """
 import argparse
 import shutil
@@ -30,24 +30,19 @@ def step(msg: str):
 
 
 def sync_core():
-    for f in CORE_FILES:
-        src = BOT / "plugins" / "paradigm_score" / f
+    for name in CORE_FILES:
+        src = BOT / "plugins" / "paradigm_score" / name
         if src.exists():
-            shutil.copy2(src, TRK / "core" / f)
+            shutil.copy2(src, TRK / "core" / name)
     step("1) core synced bot -> tracker")
 
 
 def clear_pycache():
     for d in (BOT / "plugins" / "paradigm_score" / "__pycache__",
+              BOT / "plugins" / "bot_help" / "__pycache__",
               TRK / "core" / "__pycache__"):
         shutil.rmtree(d, ignore_errors=True)
     step("2) pycache cleared")
-
-
-def clear_plugin_pycache():
-    """额外清理 paradigm_score 与 bot_help 的缓存（常改动的插件）"""
-    for name in ("paradigm_score", "bot_help"):
-        shutil.rmtree(BOT / "plugins" / name / "__pycache__", ignore_errors=True)
 
 
 def restart_bot(wait: int = 22):
@@ -64,8 +59,7 @@ def restart_bot(wait: int = 22):
     time.sleep(wait)
 
 
-def health_check(retries: int = 5) -> bool:
-    code = r'''
+HEALTH_SCRIPT = '''
 import asyncio, json, websockets
 async def main():
     async with websockets.connect("ws://127.0.0.1:7999/onebot/v11/ws", open_timeout=8,
@@ -98,9 +92,45 @@ async def main():
         t.cancel()
 asyncio.run(main())
 '''
+
+VERIFY_SCRIPT = '''
+import sys, inspect
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import nonebot
+nonebot.init(driver="~fastapi")
+from plugins.paradigm_score.core_loader import get_core
+core, src = get_core()
+expect = sys.argv[1]
+bot = Path(sys.argv[2])
+texts = {str(src): inspect.getsource(core.b50_render)}
+plugin_file = bot / "plugins" / "paradigm_score" / "__init__.py"
+if plugin_file.exists():
+    texts[str(plugin_file)] = plugin_file.read_text(encoding="utf-8")
+hit = [loc for loc, tx in texts.items() if expect in tx]
+print("SRC:", hit[0] if hit else src)
+print("HAS:", bool(hit))
+'''
+
+
+def _run_temp_script(content: str, args: list[str], timeout: int) -> str:
+    tmp = Path(BOT) / "_deploy_tmp.py"
+    tmp.write_text(content, encoding="utf-8")
+    try:
+        r = subprocess.run([str(PY), str(tmp), *args],
+                           capture_output=True, text=True, timeout=timeout)
+        return (r.stdout or "") + (r.stderr or "")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def health_check(retries: int = 5) -> bool:
     for i in range(retries):
-        r = subprocess.run([str(PY), "-c", code], capture_output=True, text=True, timeout=60)
-        if "pong" in (r.stdout or ""):
+        try:
+            out = _run_temp_script(HEALTH_SCRIPT, [], 90)
+        except subprocess.TimeoutExpired:
+            out = ""
+        if "pong" in out:
             step(f"4) health OK (attempt {i+1})")
             return True
         time.sleep(8)
@@ -109,23 +139,13 @@ asyncio.run(main())
 
 
 def verify_loaded(expect: str | None) -> bool:
-    """校验「新进程」实际加载的 core 模块源码是否包含期望特征"""
     if not expect:
         return True
-    code = rf'''
-import sys, inspect
-sys.path.insert(0, r"{BOT}")
-import nonebot
-nonebot.init(driver="~fastapi")
-from plugins.paradigm_score.core_loader import get_core
-core, src = get_core()
-mod = core.b50_render
-text = inspect.getsource(mod)
-print("SRC:", src)
-print("HAS:", "{expect}" in text)
-'''
-    r = subprocess.run([str(PY), "-c", code], capture_output=True, text=True, timeout=90)
-    out = (r.stdout or "") + (r.stderr or "")
+    try:
+        out = _run_temp_script(VERIFY_SCRIPT, [expect, str(BOT)], 120)
+    except subprocess.TimeoutExpired:
+        step("5) loaded-module check: TIMEOUT")
+        return False
     ok = "HAS: True" in out
     src_line = next((ln for ln in out.splitlines() if ln.startswith("SRC:")), "")
     step(f"5) loaded-module check: {'PASS' if ok else 'FAIL'} | {src_line}")
@@ -136,13 +156,12 @@ print("HAS:", "{expect}" in text)
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--expect", default=None, help="core.b50_render 源码应包含的特征串")
+    ap.add_argument("--expect", default=None, help="模块源码应包含的特征串")
     ap.add_argument("--wait", type=int, default=22)
     args = ap.parse_args()
 
     sync_core()
     clear_pycache()
-    clear_plugin_pycache()
     restart_bot(args.wait)
     ok_health = health_check()
     ok_verify = verify_loaded(args.expect)
