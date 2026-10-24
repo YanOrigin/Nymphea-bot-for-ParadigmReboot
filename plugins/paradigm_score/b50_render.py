@@ -86,7 +86,7 @@ COLS = 4
 
 
 def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
-               rec: dict, cover: Image.Image | None, font_s, font_xs):
+               rec: dict, cover: Image.Image | None, font_s, font_xs, fitting: bool = False):
     diff = (rec.get("chart") or {}).get("difficulty", "invaded")
     color = DIFF_COLORS.get(diff, (120, 120, 120))
     # 卡片底
@@ -108,13 +108,16 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
     lv = chart.get("fitting_level") or chart.get("level") or 0
     draw.text((tx, y + 34), f"{diff} {lv:g}", fill=color, font=font_xs)
     draw.text((tx, y + 52), _fmt_score(int(rec.get("score") or 0)), fill=TEXT_DIM, font=font_xs)
-    rating = rec.get("fitting_rating") if rec.get("fitting_rating") is not None else rec.get("rating")
-    draw.text((x + CELL_W - 10, y + 12), f"{_rating_to_float(rating or 0):.2f}",
+    if fitting and rec.get("fitting_rating") is not None:
+        rating = rec["fitting_rating"]
+    else:
+        rating = rec.get("rating") or 0
+    draw.text((x + CELL_W - 10, y + 12), f"{_rating_to_float(rating):.2f}",
               fill=ACCENT, font=font_s, anchor="ra")
 
 
 def _render(sections: list[dict], username: str, nickname: str, total_rating: float,
-            title: str, covers: dict, out_path: Path, footer: str = "") -> Path:
+            title: str, covers: dict, out_path: Path, footer: str = "", fitting: bool = False) -> Path:
     """sections: [{"label": "Best 15", "avg": 1712.34, "records": [...], "cutoff": 15}]"""
     f_title = _font(30, bold=True)
     f_sub = _font(18)
@@ -156,7 +159,7 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
             x = margin + col * (CELL_W + GAP)
             cy = y + row * (CELL_H + GAP)
             cover = covers.get((rec.get("chart") or {}).get("cover") or "")
-            _draw_cell(img, draw, x, cy, rec, cover, f_s, f_xs)
+            _draw_cell(img, draw, x, cy, rec, cover, f_s, f_xs, fitting)
         y += h
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,7 +169,7 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
 
 async def render_b50_image(username: str, nickname: str, sections: list[dict],
                            total_rating: float, title: str, out_path: Path,
-                           footer: str = "") -> Path:
+                           footer: str = "", fitting: bool = False) -> Path:
     """异步入口：并发拉曲绘后渲染"""
     cache_dir = out_path.parent / "covers"
     all_recs = [r for sec in sections for r in sec["records"]]
@@ -181,5 +184,5 @@ async def render_b50_image(username: str, nickname: str, sections: list[dict],
 
     covers = await asyncio.to_thread(_fetch_all)
     return await asyncio.to_thread(
-        _render, sections, username, nickname, total_rating, title, covers, out_path, footer
+        _render, sections, username, nickname, total_rating, title, covers, out_path, footer, fitting
     )
