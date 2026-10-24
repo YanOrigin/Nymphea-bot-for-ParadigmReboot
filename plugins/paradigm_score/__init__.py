@@ -101,6 +101,8 @@ bind_ios = on_command("范式绑定ios", aliases={"范式绑定abroad", "范式�
 unbind_token = on_command("范式解绑", rule=to_me(), priority=5, block=True)
 fetch_scores = on_command("更新成绩", rule=to_me(), priority=5, block=True)
 query_score = on_command("b50", rule=to_me(), priority=5, block=True)
+ad50_cmd = on_command("ad50", rule=to_me(), priority=5, block=True)
+fc50_cmd = on_command("fc50", rule=to_me(), priority=5, block=True)
 
 
 def _mask_device(devid: str) -> str:
@@ -513,6 +515,152 @@ async def handle_b50(event: MessageEvent, arg: Message = CommandArg()):
         Message([MessageSegment.text(f"📊 {title}\n{total_line}\n"),
                  MessageSegment.image(img_path.resolve().as_uri())])
     )
+# ---------- AD50 / FC50（按判定筛选） ----------
+
+
+def _judge_ok(rec: dict, kind: str) -> bool:
+    """判定筛选。kind: 'ad' | 'fc'"""
+    lost = int(rec.get("lost_count") or 0)
+    if lost != 0:
+        return False  # AD 与 FC 都要求 0 Miss
+    if kind == "ad":
+        received = int(rec.get("received_count") or 0)
+        return received == 0  # AD 还要求 0 Good
+    return True
+
+
+def _fetch_judge50(username: str, game_records: list[dict], kind: str) -> dict:
+    """按判定筛选游戏成绩 → 对到 PRP chart.id → 取 rating → 排序取前50（线程池执行）"""
+    prp = core.prp_api
+    chart_map = _get_chart_map()
+
+    # 1) 筛出符合判定的游戏谱面，映射到 PRP chart id
+    wanted: dict[int, dict] = {}   # prp_chart_id -> 游戏记录（含判定）
+    unmapped = 0
+    for r in game_records:
+        if not _judge_ok(r, kind):
+            continue
+        cid = r.get("chart_id")
+        if not cid:
+            continue
+        prp_id = chart_map.resolve(cid)
+        if prp_id is None:
+            unmapped += 1
+            continue
+        wanted[prp_id] = r
+
+    if not wanted:
+        return {"records": [], "unmapped": unmapped, "total": 0.0, "count": 0}
+
+    # 2) 拉 PRP 全量成绩，按 chart.id 取 rating
+    data = prp.fetch_b50(username)
+    prp_recs = {int((x.get("chart") or {}).get("id") or 0): x for x in data.get("records", [])}
+
+    merged = []
+    for prp_id, game_rec in wanted.items():
+        pr = prp_recs.get(prp_id)
+        if not pr:
+            continue  # PRP 上没有这条成绩（未传分）
+        item = dict(pr)
+        # 附带判定数据供渲染/调试
+        item["_judge"] = {
+            "lost": int(game_rec.get("lost_count") or 0),
+            "received": int(game_rec.get("received_count") or 0),
+            "decrypted": int(game_rec.get("decrypted_count") or 0),
+            "decrypted_plus": int(game_rec.get("decrypted_plus_count") or 0),
+        }
+        merged.append(item)
+
+    merged.sort(key=lambda x: -(x.get("rating") or 0))
+    top = merged[:50]
+    avg = sum(x.get("rating") or 0 for x in top) / max(1, len(top)) / 100
+    return {"records": top, "unmapped": unmapped, "total": avg, "count": len(merged)}
+
+
+async def _handle_judge50(event: MessageEvent, kind: str):
+    uid = str(event.user_id)
+    prp = _load_prp().get(uid)
+    label = {"ad": "AD50", "fc": "FC50"}[kind]
+    judge_desc = {"ad": "All Perfect（0 Good · 0 Miss）", "fc": "Full Combo（0 Miss）"}[kind]
+
+    if not prp:
+        await query_score.finish(f"未绑定 PRP 账号，请先 /绑定prp <用户名> <上传token>")
+
+    # 判定数据只在游戏成绩缓存里
+    sf = _user_score_file(uid)
+    if not sf.exists():
+        await query_score.finish(
+            f"{label} 需要判定数据，但你还没有成绩缓存。\n"
+            f"请先 /更新成绩 拉取一次游戏成绩（之后 6 小时内可直接查）"
+        )
+    cache = json.loads(sf.read_text(encoding="utf-8"))
+    game_records = cache.get("records", [])
+    if not game_records:
+        await query_score.finish("成绩缓存为空，请先 /更新成绩")
+
+    await query_score.send(f"⏳ 正在统计 {label}（{judge_desc}）……")
+
+    try:
+        result = await asyncio.to_thread(_fetch_judge50, prp["username"], game_records, kind)
+    except core.prp_api.PrpAPIError as e:
+        await query_score.finish(f"❌ 获取 PRP 成绩失败：{e}")
+    except Exception as e:
+        logger.exception(f"{label} 统计异常")
+        await query_score.finish(f"❌ 统计异常：{e!r}")
+
+    recs = result["records"]
+    if not recs:
+        hint = ""
+        if result.get("unmapped"):
+            hint = f"\n（有 {result['unmapped']} 个谱面未收录到 PRP 映射）"
+        await query_score.finish(
+            f"你还没有达成 {judge_desc} 的成绩，或对应成绩尚未传分到 PRP{hint}"
+        )
+
+    sections = [{"label": f"{label} · Top {len(recs)}", "avg": result["total"], "records": recs}]
+    out = _SCORES_DIR / f"{label.lower()}_{uid}.jpg"
+    title = f"Paradigm: Reboot {label}"
+    try:
+        _qt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        img_path = await core.b50_render.render_b50_image(
+            prp["username"], prp.get("nickname") or prp["username"],
+            sections, result["total"], title, out,
+            footer=f"{judge_desc} · PRP: {prp['username']}",
+            fitting=False,
+            query_time=_qt,
+        )
+    except Exception as e:
+        logger.exception(f"{label} 渲染失败")
+        await query_score.finish(f"❌ 报告渲染失败：{e!r}")
+
+    from nonebot.adapters.onebot.v11 import MessageSegment
+
+    def _trunc2(x: float) -> str:
+        scaled = int(x * 100 + 1e-9)
+        return f"{scaled // 100}.{scaled % 100:02d}"
+
+    await query_score.finish(
+        Message([
+            MessageSegment.text(
+                f"📊 {title}\n"
+                f"达成谱面：{result['count']} 个（展示 rating 前 {len(recs)}）\n"
+                f"平均 Rating：{_trunc2(result['total'])}\n"
+            ),
+            MessageSegment.image(img_path.resolve().as_uri()),
+        ])
+    )
+
+
+@ad50_cmd.handle()
+async def handle_ad50(event: MessageEvent):
+    await _handle_judge50(event, "ad")
+
+
+@fc50_cmd.handle()
+async def handle_fc50(event: MessageEvent):
+    await _handle_judge50(event, "fc")
+
+
 _PRP_FILE = Path(config.prp_accounts_file)
 
 
