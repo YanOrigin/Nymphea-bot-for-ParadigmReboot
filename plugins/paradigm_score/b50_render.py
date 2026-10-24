@@ -26,8 +26,8 @@ TEXT_DIM = (150, 158, 176)
 ACCENT = (108, 166, 255)
 
 DIFF_COLORS = {
-    "detected": (94, 204, 158),
-    "invaded": (86, 156, 245),
+    "detected": (86, 156, 245),   # 原 invaded 蓝
+    "invaded": (218, 41, 28),     # PANTONE 485 C (#DA291C)
     "massive": (176, 108, 245),
     "reboot": (240, 158, 82),
 }
