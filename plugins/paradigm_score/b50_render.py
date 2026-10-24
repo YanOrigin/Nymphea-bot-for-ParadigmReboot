@@ -8,6 +8,7 @@
 """
 import asyncio
 import io
+from datetime import datetime
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -85,9 +86,9 @@ def _load_cover_sync(filename: str, cache_dir: Path, size: int) -> Image.Image |
 
 # ---------- 单元格 ----------
 
-CELL_W = 372
-CELL_H = 96
-GAP = 10
+CELL_W = 558   # 372 * 1.5
+CELL_H = 144   # 96 * 1.5
+GAP = 15
 COLS = 5
 
 
@@ -134,114 +135,111 @@ def _text_w(text: str, font) -> int:
 
 
 def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
-               rec: dict, cover: Image.Image | None, font_s, font_xs, fitting: bool = False):
+               rec: dict, cover: Image.Image | None, f_title, f_small, f_rating,
+               fitting: bool = False):
     diff = (rec.get("chart") or {}).get("difficulty", "invaded")
     color = DIFF_COLORS.get(diff, (120, 120, 120))
     # 卡片底
-    draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=8, fill=CARD_BG)
+    draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=12, fill=CARD_BG)
     # 左侧难度色条
-    draw.rounded_rectangle([x, y, x + 5, y + CELL_H], radius=2, fill=color)
-    # 曲绘
+    draw.rounded_rectangle([x, y, x + 7, y + CELL_H], radius=3, fill=color)
+    # 曲绘 96x96
     if cover:
-        img.paste(cover, (x + 14, y + 16))
+        img.paste(cover, (x + 21, y + 24))
     else:
-        draw.rounded_rectangle([x + 14, y + 16, x + 14 + 64, y + 16 + 64], radius=4, fill=FALLBACK_COVER)
-        draw.ellipse([x + 36, y + 40, x + 46, y + 50], fill=TEXT_DIM)  # 缺省占位圆点
+        draw.rounded_rectangle([x + 21, y + 24, x + 21 + 96, y + 24 + 96], radius=6, fill=FALLBACK_COVER)
+        draw.ellipse([x + 55, y + 60, x + 71, y + 76], fill=TEXT_DIM)
     # 文本区
-    tx = x + 88
+    tx = x + 132
     chart = rec.get("chart") or {}
     title = chart.get("title") or "?"
     fit_mark = "*" if chart.get("fitting_rating") is not None and chart.get("fitting_level") is None else ""
-    # 曲名整行（不受 rating 挤占），自动换行最多 2 行
     title_full = f"{title}{fit_mark}"
-    max_w = CELL_W - 88 - 12
-    lines = _wrap_title(title_full, font_s, max_w, max_lines=2)
-    draw.text((tx, y + 10), lines[0], fill=TEXT, font=font_s)
+    max_w = CELL_W - 132 - 18
+    lines = _wrap_title(title_full, f_title, max_w, max_lines=2)
+    draw.text((tx, y + 14), lines[0], fill=TEXT, font=f_title)
     if len(lines) > 1:
-        draw.text((tx, y + 30), lines[1], fill=TEXT, font=font_s)
-        lv_y, score_y = y + 52, y + 72   # 两行曲名：定数/分数下移
+        draw.text((tx, y + 44), lines[1], fill=TEXT, font=f_title)
+        lv_y, score_y = y + 74, y + 106
     else:
-        lv_y, score_y = y + 36, y + 62
+        lv_y, score_y = y + 58, y + 96
     if fitting and chart.get("fitting_level") is not None:
-        lv = chart["fitting_level"]  # 拟合模式显示拟合定数
+        lv = chart["fitting_level"]
     else:
-        lv = chart.get("level") or 0  # 标准/全局模式：官方定数
-    draw.text((tx, lv_y), f"{diff} {lv:g}", fill=color, font=font_xs)
-    # 第三行：分数（左）+ 单曲 rating（右，同行）
-    draw.text((tx, score_y), _fmt_score(int(rec.get("score") or 0)), fill=TEXT_DIM, font=font_xs)
+        lv = chart.get("level") or 0
+    draw.text((tx, lv_y), f"{diff} {lv:g}", fill=color, font=f_small)
+    # 第三行：分数（左） + 单曲 rating（右）
+    draw.text((tx, score_y), _fmt_score(int(rec.get("score") or 0)), fill=TEXT_DIM, font=f_small)
     if fitting and rec.get("fitting_rating") is not None:
         rating = rec["fitting_rating"]
     else:
         rating = rec.get("rating") or 0
-    draw.text((x + CELL_W - 12, score_y + 2), _fmt_rating2(_rating_to_float(rating)),
-              fill=ACCENT, font=font_s, anchor="ra")
+    draw.text((x + CELL_W - 18, score_y + 2), _fmt_rating2(_rating_to_float(rating)),
+              fill=ACCENT, font=f_rating, anchor="ra")
 
 
 def _render(sections: list[dict], username: str, nickname: str, total_rating: float,
-            title: str, covers: dict, out_path: Path, footer: str = "", fitting: bool = False) -> Path:
-    """sections: [{"label": "Best 15", "avg": 1712.34, "records": [...], "cutoff": 15}]"""
-    f_title = _font(30, bold=True)
-    f_sub = _font(18)
-    f_sec = _font(22, bold=True)
-    f_s = _font(16, bold=False)
-    f_xs = _font(14)
-    f_big = _font(40, bold=True)
+            title: str, covers: dict, out_path: Path, footer: str = "", fitting: bool = False,
+            query_time: str | None = None) -> Path:
+    """sections: [{"label": "Best 35", "avg": 166.7, "records": [...]}]"""
+    f_title = _font(45, bold=True)
+    f_sub = _font(27)
+    f_sec = _font(33, bold=True)
+    f_big = _font(56, bold=True)
+    f_label = _font(21)
+    # 单元格字号：曲名保持最初版本 16pt（用户要求），其余等比稍放大
+    f_cell_title = _font(16)
+    f_cell_small = _font(18)
+    f_cell_rating = _font(20)
 
-    margin = 28
-    header_h = 110
-    sec_head_h = 56
+    margin = 40
+    header_h = 132
+    sec_head_h = 78
     width = margin * 2 + COLS * CELL_W + (COLS - 1) * GAP
 
-    # 预计算高度
     heights = []
     for sec in sections:
         rows = (len(sec["records"]) + COLS - 1) // COLS
-        # 有两行曲名的行需要额外高度：按每行最大单元格高度计算
-        extra = 0
-        for i in range(0, len(sec["records"]), COLS):
-            row_recs = sec["records"][i:i + COLS]
-            row_h = max((CELL_H + (18 if _needs_two_lines(r) else 0) for r in row_recs), default=CELL_H)
-            extra += row_h + GAP - (CELL_H + GAP)
-        heights.append(sec_head_h + rows * (CELL_H + GAP) + extra + 12)
-    total_h = header_h + sum(heights) + margin * 2 + (30 if footer else 0)
+        heights.append(sec_head_h + rows * (CELL_H + GAP) + 16)
+    total_h = header_h + sum(heights) + margin * 2 + (44 if footer else 0)
 
     img = Image.new("RGB", (width, total_h), BG)
     draw = ImageDraw.Draw(img)
 
-    # 头部
-    draw.text((margin, 24), title, fill=TEXT, font=f_title)
-    draw.text((margin, 66), f"{nickname or username}  ·  {footer or 'Rating Report'}", fill=TEXT_DIM, font=f_sub)
-    draw.text((width - margin, 30), _fmt_rating2(total_rating), fill=ACCENT, font=f_big, anchor="ra")
-    draw.text((width - margin, 78), "TOTAL RATING", fill=TEXT_DIM, font=f_xs, anchor="ra")
-    draw.line([(margin, header_h - 12), (width - margin, header_h - 12)], fill=(52, 58, 78), width=2)
+    # ---- 头部：左上角查询时间 ----
+    ts = query_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    draw.text((margin, 14), f"查询时间 {ts}", fill=TEXT_DIM, font=f_label)
+    draw.text((margin, 44), title, fill=TEXT, font=f_title)
+    draw.text((margin, 98), f"{nickname or username}  ·  {footer or 'Rating Report'}", fill=TEXT_DIM, font=f_sub)
+    draw.text((width - margin, 36), _fmt_rating2(total_rating), fill=ACCENT, font=f_big, anchor="ra")
+    draw.text((width - margin, 100), "TOTAL RATING", fill=TEXT_DIM, font=f_label, anchor="ra")
+    draw.line([(margin, header_h - 14), (width - margin, header_h - 14)], fill=(52, 58, 78), width=3)
 
-    # 分节
+    # ---- 分节 ----
     y = header_h + margin // 2
     for sec, h in zip(sections, heights):
-        draw.text((margin, y + 8), sec["label"], fill=TEXT, font=f_sec)
-        draw.text((width - margin, y + 10), f"AVG {_fmt_rating2(sec['avg'])}", fill=ACCENT, font=f_sub, anchor="ra")
+        draw.text((margin, y + 10), sec["label"], fill=TEXT, font=f_sec)
+        draw.text((width - margin, y + 18), f"AVG {_fmt_rating2(sec['avg'])}", fill=ACCENT, font=f_sub, anchor="ra")
         y += sec_head_h
         row_y = y
         for i, rec in enumerate(sec["records"]):
             row, col = divmod(i, COLS)
             if col == 0 and row > 0:
-                # 新行起点：累加之前每行的实际高度
-                prev_recs = sec["records"][max(0, i - COLS):i]
-                row_y += max((CELL_H + (18 if _needs_two_lines(r) else 0) for r in prev_recs), default=CELL_H) + GAP
+                row_y += CELL_H + GAP
             x = margin + col * (CELL_W + GAP)
-            cy = row_y
             cover = covers.get((rec.get("chart") or {}).get("cover") or "")
-            _draw_cell(img, draw, x, cy, rec, cover, f_s, f_xs, fitting)
+            _draw_cell(img, draw, x, row_y, rec, cover, f_cell_title, f_cell_small, f_cell_rating, fitting)
         y += h
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    img.save(out_path, "JPEG", quality=92)
+    img.save(out_path, "JPEG", quality=90)
     return out_path
 
 
 async def render_b50_image(username: str, nickname: str, sections: list[dict],
                            total_rating: float, title: str, out_path: Path,
-                           footer: str = "", fitting: bool = False) -> Path:
+                           footer: str = "", fitting: bool = False,
+                           query_time: str | None = None) -> Path:
     """异步入口：并发拉曲绘后渲染"""
     cache_dir = out_path.parent / "covers"
     all_recs = [r for sec in sections for r in sec["records"]]
@@ -256,5 +254,5 @@ async def render_b50_image(username: str, nickname: str, sections: list[dict],
 
     covers = await asyncio.to_thread(_fetch_all)
     return await asyncio.to_thread(
-        _render, sections, username, nickname, total_rating, title, covers, out_path, footer, fitting
+        _render, sections, username, nickname, total_rating, title, covers, out_path, footer, fitting, query_time
     )
