@@ -495,6 +495,7 @@ async def handle_b50(event: MessageEvent, arg: Message = CommandArg()):
             prp["username"], prp.get("nickname") or prp["username"],
             sections, result["total"], title, out,
             footer=f"{mode_label}{fit_note} · PRP: {prp['username']}",
+            fitting=fitting,
         )
     except Exception as e:
         logger.exception("b50 render failed")
