@@ -56,6 +56,12 @@ def _rating_to_float(r: int) -> float:
     return r / 100
 
 
+def _fmt_rating2(x: float) -> str:
+    """保留两位小数但【截断不四舍五入】（165.9856 -> 165.98）"""
+    scaled = int(x * 100 + 1e-9)  # 浮点容错
+    return f"{scaled // 100}.{scaled % 100:02d}"
+
+
 def _fmt_score(n: int) -> str:
     return f"{n:,}"
 
@@ -105,14 +111,17 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
     title = (chart.get("title") or "?")[:16]
     fit_mark = "*" if chart.get("fitting_rating") is not None and chart.get("fitting_level") is None else ""
     draw.text((tx, y + 10), f"{title}{fit_mark}", fill=TEXT, font=font_s)
-    lv = chart.get("fitting_level") or chart.get("level") or 0
+    if fitting and chart.get("fitting_level") is not None:
+        lv = chart["fitting_level"]  # 拟合模式显示拟合定数
+    else:
+        lv = chart.get("level") or 0  # 标准/全局模式：官方定数
     draw.text((tx, y + 34), f"{diff} {lv:g}", fill=color, font=font_xs)
     draw.text((tx, y + 52), _fmt_score(int(rec.get("score") or 0)), fill=TEXT_DIM, font=font_xs)
     if fitting and rec.get("fitting_rating") is not None:
         rating = rec["fitting_rating"]
     else:
         rating = rec.get("rating") or 0
-    draw.text((x + CELL_W - 10, y + 12), f"{_rating_to_float(rating):.2f}",
+    draw.text((x + CELL_W - 10, y + 12), _fmt_rating2(_rating_to_float(rating)),
               fill=ACCENT, font=font_s, anchor="ra")
 
 
@@ -144,7 +153,7 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
     # 头部
     draw.text((margin, 24), title, fill=TEXT, font=f_title)
     draw.text((margin, 66), f"{nickname or username}  ·  {footer or 'Rating Report'}", fill=TEXT_DIM, font=f_sub)
-    draw.text((width - margin, 30), f"{total_rating:.2f}", fill=ACCENT, font=f_big, anchor="ra")
+    draw.text((width - margin, 30), _fmt_rating2(total_rating), fill=ACCENT, font=f_big, anchor="ra")
     draw.text((width - margin, 78), "TOTAL RATING", fill=TEXT_DIM, font=f_xs, anchor="ra")
     draw.line([(margin, header_h - 12), (width - margin, header_h - 12)], fill=(52, 58, 78), width=2)
 
@@ -152,7 +161,7 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
     y = header_h + margin // 2
     for sec, h in zip(sections, heights):
         draw.text((margin, y + 8), sec["label"], fill=TEXT, font=f_sec)
-        draw.text((width - margin, y + 10), f"AVG {sec['avg']:.2f}", fill=ACCENT, font=f_sub, anchor="ra")
+        draw.text((width - margin, y + 10), f"AVG {_fmt_rating2(sec['avg'])}", fill=ACCENT, font=f_sub, anchor="ra")
         y += sec_head_h
         for i, rec in enumerate(sec["records"]):
             row, col = divmod(i, COLS)
