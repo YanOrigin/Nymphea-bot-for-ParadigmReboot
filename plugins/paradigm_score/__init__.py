@@ -21,6 +21,8 @@
 import asyncio
 import json
 import time
+import urllib.request
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -40,8 +42,8 @@ __plugin_meta__ = PluginMetadata(
     name="paradigm_score",
     description="范式：起源查分（游戏成绩提取 + PRP 传分 + B50 报告图）",
     usage=(
-        "/范式登录            从本机登录工具读取凭据自动绑定（推荐，主人用）\n"
-        "/范式绑定 <凭据>     手动绑定（建议私聊）\n"
+        "/范式绑定            快爆账号网页授权绑定（点链接登录即可）\n"
+        "/范式绑定ios <手机号> <密码>  击弦账号绑定（iOS/外服）\n"
         "/更新成绩            拉取你的最佳成绩列表并自动传分（6h 冷却）\n"
         "/绑定prp <用户名> <上传token>   绑定 PRP 账号\n"
         "/传分                手动传分（不受冷却限制）\n"
@@ -93,8 +95,8 @@ def _mask(creds: dict) -> str:
 
 # ---------- 指令 ----------
 
-bind_token = on_command("范式绑定", rule=to_me(), priority=5, block=True)
-login_bind = on_command("范式登录", rule=to_me(), priority=5, block=True)
+bind_token = on_command("范式绑定", rule=to_me(), priority=5, block=True)  # 快爆网页授权
+bind_ios = on_command("范式绑定ios", aliases={"范式绑定abroad", "范式绑定外服"}, rule=to_me(), priority=5, block=True)
 unbind_token = on_command("范式解绑", rule=to_me(), priority=5, block=True)
 fetch_scores = on_command("更新成绩", rule=to_me(), priority=5, block=True)
 query_score = on_command("b50", rule=to_me(), priority=5, block=True)
@@ -237,40 +239,128 @@ async def _do_bind(matcher, uid: str, creds: dict, source_note: str = ""):
     )
 
 
+# ---------- 网页授权绑定（快爆：Cloudflare Worker 中转） ----------
+
+AUTH_BASE = config.auth_relay_base  # Worker 地址，如 https://paradigm-auth-relay.xxx.workers.dev
+AUTH_SECRET = config.auth_relay_secret
+
+
+def _relay_create(qq: str) -> str:
+    """向 Worker 请求一次性授权令牌"""
+    body = json.dumps({"secret": AUTH_SECRET, "qq": qq}).encode()
+    req = urllib.request.Request(f"{AUTH_BASE}/api/create", data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "NympheaBot/0.1"}, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        d = json.loads(r.read().decode())
+    if "token" not in d:
+        raise RuntimeError(f"中转服务响应异常: {d}")
+    return d["token"]
+
+
+def _relay_poll(token: str) -> dict:
+    """查询授权结果。status: pending/done/expired"""
+    req = urllib.request.Request(f"{AUTH_BASE}/api/result/{token}",
+        headers={"User-Agent": "NympheaBot/0.1"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode())
+
+
 @bind_token.handle()
-async def handle_bind(event: MessageEvent, arg: Message = CommandArg()):
-    raw = arg.extract_plain_text().strip()
-    if not raw:
-        await bind_token.finish(
-            "用法：/范式绑定 <凭据>\n\n"
-            "推荐：先在本机跑登录工具（或让 bot 主人 /范式登录），再用 base64 绑定码绑定；"
-            "也支持 session|uid 简写。\n⚠️ 强烈建议私聊绑定，避免凭据泄露"
-        )
-    try:
-        creds = await asyncio.to_thread(core.prd_api.parse_bind_token, raw)
-    except core.prd_api.PrdAPIError as e:
-        await bind_token.finish(f"❌ 凭据无效：{e}")
-    await _do_bind(bind_token, str(event.user_id), creds)
-
-
-@login_bind.handle()
-async def handle_login(event: MessageEvent):
-    """自动化绑定：从本机登录工具的数据目录读取凭据（含 device_id 固化）"""
+async def handle_bind(event: MessageEvent):
+    """快爆网页授权：生成专属链接 → 用户浏览器登录 → bot 轮询取凭据自动绑定"""
+    if not AUTH_BASE or not AUTH_SECRET:
+        await bind_token.finish("⚠️ 授权中转服务未配置（bot 主人设置 AUTH_RELAY_* 后可用）")
     uid = str(event.user_id)
     try:
-        result = await asyncio.to_thread(core.prd_api.read_local_creds)
-    except core.prd_api.PrdAPIError as e:
-        await login_bind.finish(
-            f"❌ 本机未找到可用凭据：{e}\n\n"
-            "请先完成一次登录授权：\n"
-            "  cd D:\\Developed\\paradigm-reboot-data\n"
-            "  .venv\\Scripts\\python tools\\fetch_scores_hykb.py\n"
-            "（首次会弹浏览器，手机号+验证码登录即可）\n"
-            "完成后重新 /范式登录"
+        token = await asyncio.to_thread(_relay_create, uid)
+    except Exception as e:
+        await bind_token.finish(f"❌ 授权服务暂不可用：{e!r}")
+
+    link = f"{AUTH_BASE}/auth/{token}"
+    await bind_token.send(
+        "🔐 快爆账号授权（手机号 + 短信验证码，全程不接触密码）：\n"
+        f"{link}\n\n"
+        "⏳ 等待你在浏览器中完成登录（10 分钟内有效）……"
+    )
+
+    # 轮询最多 10 分钟（Worker 侧 TTL 同步）
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        await asyncio.sleep(6)
+        try:
+            r = await asyncio.to_thread(_relay_poll, token)
+        except Exception as e:
+            logger.warning(f"授权轮询失败: {e!r}")
+            continue
+        if r.get("status") == "pending":
+            continue
+        if r.get("status") == "expired":
+            await bind_token.finish("⌛ 授权超时（10 分钟），请重新 /范式绑定")
+        if r.get("status") == "done":
+            payload = r.get("payload") or {}
+            uid_hykb = str(payload.get("userId") or payload.get("uid") or "")
+            if not uid_hykb:
+                await bind_token.finish("❌ 授权数据异常（缺 uid），请重新 /范式绑定")
+            # 组装凭据：credential-only（bot 自动续期 Session）+ 独立设备指纹
+            creds = {
+                "uid": uid_hykb,
+                "hykb_credential": payload,
+                "deviceid": str(uuid.uuid4()),  # 每账号终身一个，首次持久化
+            }
+            await _do_bind(bind_token, uid, creds,
+                           source_note="\n（来源：网页授权，快爆长期凭据已保存）")
+    await bind_token.finish("⌛ 授权等待超时（10 分钟），请重新 /范式绑定")
+
+
+# ---------- 击弦绑定（iOS/外服：手机号+密码） ----------
+
+
+@bind_ios.handle()
+async def handle_bind_ios(event: MessageEvent, arg: Message = CommandArg()):
+    """击弦账号绑定：手机号+密码 → 纯协议登录 → 绑定。密码仅用于登录，存本地不回显。"""
+    parts = arg.extract_plain_text().split()
+    if len(parts) != 2:
+        await bind_ios.finish(
+            "用法：/范式绑定ios <手机号> <密码>\n"
+            "（适用于国服 iOS / 外服账号，即击弦账号体系）\n"
+            "⚠️ 建议私聊操作；密码仅存本地用于自动续期，不会出现在任何回复或日志里"
         )
-    await _do_bind(
-        login_bind, uid, result["creds"],
-        source_note=f"\n（来源：本机登录工具，设备已固化 {_mask_device(result['creds'].get('deviceid', ''))}）",
+    phone, password = parts[0], parts[1]
+    if not (phone.isdigit() and len(phone) == 11):
+        await bind_ios.finish("❌ 手机号格式不对（应为 11 位数字）")
+
+    uid = str(event.user_id)
+    await bind_ios.send("⏳ 击弦账号登录中……")
+
+    def _saver(c: dict):
+        tokens = _load_tokens()
+        tokens[uid] = c
+        _save_tokens(tokens)
+
+    device_id = str(uuid.uuid4())
+    creds = {"jixian": {"phone": phone, "password": password}, "deviceid": device_id}
+    try:
+        login_res = await asyncio.to_thread(
+            core.prd_api.jixian_login, phone, password, device_id)
+        creds.update(login_res)
+    except core.prd_api.PrdAPIError as e:
+        await bind_ios.finish(f"❌ 登录失败：{e}\n（未保存任何信息）")
+
+    # 拉首次成绩验证 + 缓存
+    try:
+        records = await _action_fetch_and_cache(uid, creds)
+    except core.prd_api.PrdAPIError as e:
+        await bind_ios.finish(f"❌ 成绩拉取失败：{e}\n（未保存）")
+
+    tokens = _load_tokens()
+    tokens[uid] = creds
+    _save_tokens(tokens)
+    _cooldown_mark(uid)
+    await bind_ios.finish(
+        f"✅ 击弦账号绑定成功（手机号 {phone[:3]}****{phone[-4:]}）\n"
+        f"首次成绩已拉取：{len(records)} 条最佳记录\n"
+        f"⚠️ 击弦 Session 有效期较短，失效后 /更新成绩 会自动用保存的账密重新登录\n"
+        f"绑定 PRP 账号后（/绑定prp）成绩自动上传并生成 B50 报告"
     )
 
 
@@ -279,7 +369,7 @@ async def handle_unbind(event: MessageEvent):
     uid = str(event.user_id)
     tokens = _load_tokens()
     if uid not in tokens:
-        await unbind_token.finish("你还没有绑定过凭据")
+        await unbind_token.finish("你还没有绑定过游戏账号")
     tokens.pop(uid)
     _save_tokens(tokens)
     sf = _user_score_file(uid)
@@ -293,7 +383,7 @@ async def handle_fetch(event: MessageEvent):
     uid = str(event.user_id)
     creds = _load_tokens().get(uid)
     if not creds:
-        await fetch_scores.finish("未检测到凭据，请先 /范式登录 或 /范式绑定（建议私聊）")
+        await fetch_scores.finish("未绑定游戏账号，请先 /范式绑定（快爆）或 /范式绑定ios（iOS/外服）")
 
     # 游戏侧 6h 冷却（防风控）
     ok, note = _cooldown_check(uid)
@@ -328,25 +418,6 @@ async def handle_fetch(event: MessageEvent):
         lines.append("💡 绑定 PRP 账号后（/绑定prp）将自动上传成绩")
 
     await fetch_scores.finish("\n".join(lines))
-
-
-@query_score.handle()
-async def handle_query(event: MessageEvent):
-    uid = str(event.user_id)
-    creds = _load_tokens().get(uid)
-    if not creds:
-        await query_score.finish("未检测到凭据，请先 /范式绑定 <凭据>（建议私聊）")
-    sf = _user_score_file(uid)
-    if not sf.exists():
-        await query_score.finish("还没有成绩缓存，请先 /更新成绩 拉取一次")
-    data = json.loads(sf.read_text(encoding="utf-8"))
-    cred_note = "Session 自动续期已启用" if creds.get("hykb_credential") else "⚠️ 无 credential，Session 过期后需重新绑定"
-    await query_score.finish(
-        f"📊 缓存状态：{data.get('count', '?')} 条最佳记录\n"
-        f"拉取时间：{data.get('fetched_at', '?')}\n"
-        f"凭据状态：{_mask(creds)}（{cred_note}）\n\n"
-        f"下一步：/绑定prp 绑定 PRP 账号 → /更新成绩 自动传分 → /b50 查看报告"
-    )
 
 
 # ---------- B50 报告 ----------
@@ -527,7 +598,7 @@ async def handle_push(event: MessageEvent):
     """手动传分（不受冷却限制：不触碰游戏服务器，幂等覆盖）。"""
     uid = str(event.user_id)
     if not _load_tokens().get(uid):
-        await push_scores.finish("未绑定游戏账号，请先 /范式登录 或 /范式绑定")
+        await push_scores.finish("未绑定游戏账号，请先 /范式绑定（快爆）或 /范式绑定ios（iOS/外服）")
     if not _load_prp().get(uid):
         await push_scores.finish("未绑定 PRP 账号，请先 /绑定prp <用户名> <上传token>")
 
