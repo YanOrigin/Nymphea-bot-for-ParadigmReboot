@@ -20,8 +20,22 @@ def log(msg: str) -> None:
         f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}\n")
 
 
+def _clear_pycache() -> None:
+    """清理查分核心与插件的 __pycache__（防止源码更新后旧字节码被复用）"""
+    import shutil as _shutil
+    for d in (
+        ROOT / "plugins" / "paradigm_score" / "__pycache__",
+        Path(r"D:\Developed\ParadigmReboot-Tracker\core\__pycache__"),
+    ):
+        try:
+            _shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def main() -> None:
     log("daemon start")
+    _clear_pycache()
     while True:
         log("launching bot.py")
         try:
