@@ -132,6 +132,34 @@ class PrdClient:
 GAME_ID = "24931"
 
 
+TUNER_BASE = "https://tuner-api.paradigmchina.tunergames.com"
+
+
+def jixian_login(phone: str, password: str, device_id: str, timeout: int = 30) -> dict:
+    """击弦账号（国服 iOS/外服）登录链：手机号+密码 → authToken → 游戏Session。
+    成功返回 {"session", "uid"}；uid 用手机号合成（击弦链无独立数字 uid）。"""
+    body = json.dumps({"phone": phone, "password": password}).encode()
+    r = urllib.request.Request(TUNER_BASE + "/account/login", data=body,
+        headers={"Content-Type": "application/json;charset=utf-8",
+                 "User-Agent": "BestHTTP", "X-Device-Id": device_id}, method="POST")
+    try:
+        auth = json.loads(urllib.request.urlopen(r, timeout=timeout).read())["data"]["authToken"]
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, KeyError, json.JSONDecodeError) as e:
+        detail = ""
+        if isinstance(e, urllib.error.HTTPError):
+            detail = e.read().decode("utf-8", "replace")[:120]
+        raise PrdAPIError(f"击弦登录失败: {e!r} {detail}") from e
+
+    r2 = urllib.request.Request(TUNER_BASE + "/account/refresh_token", data=b"{}",
+        headers={"Content-Type": "application/json;charset=utf-8", "User-Agent": "BestHTTP",
+                 "X-Device-Id": device_id, "X-Session": auth}, method="POST")
+    try:
+        session = json.loads(urllib.request.urlopen(r2, timeout=timeout).read())["data"]["authToken"]
+    except Exception as e:
+        raise PrdAPIError(f"击弦 Session 换取失败: {e!r}") from e
+    return {"session": session, "uid": f"jx_{phone}"}
+
+
 def hykb_refresh_session(credential: dict, device_id: str, timeout: int = 15) -> dict:
     """用快爆 credential 静默换新 Session。成功返回 {"session","uid"}，失败抛 PrdAPIError"""
     uid = str(credential.get("userId") or credential.get("uid") or "")
