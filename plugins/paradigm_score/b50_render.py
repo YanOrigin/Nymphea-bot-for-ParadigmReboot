@@ -85,10 +85,10 @@ def _load_cover_sync(filename: str, cache_dir: Path, size: int) -> Image.Image |
 
 # ---------- 单元格 ----------
 
-CELL_W = 372
+CELL_W = 302
 CELL_H = 84
 GAP = 10
-COLS = 4
+COLS = 5
 
 
 def _needs_two_lines(rec: dict) -> bool:
@@ -143,18 +143,18 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
     draw.rounded_rectangle([x, y, x + 5, y + CELL_H], radius=2, fill=color)
     # 曲绘
     if cover:
-        img.paste(cover, (x + 14, y + 12))
+        img.paste(cover, (x + 12, y + 12))
     else:
-        draw.rounded_rectangle([x + 14, y + 12, x + 14 + 60, y + 12 + 60], radius=4, fill=FALLBACK_COVER)
-        draw.ellipse([x + 34, y + 34, x + 44, y + 44], fill=TEXT_DIM)  # 缺省占位圆点
+        draw.rounded_rectangle([x + 12, y + 12, x + 12 + 60, y + 12 + 60], radius=4, fill=FALLBACK_COVER)
+        draw.ellipse([x + 32, y + 34, x + 42, y + 44], fill=TEXT_DIM)  # 缺省占位圆点
     # 文本区
-    tx = x + 86
+    tx = x + 80
     chart = rec.get("chart") or {}
     title = chart.get("title") or "?"
     fit_mark = "*" if chart.get("fitting_rating") is not None and chart.get("fitting_level") is None else ""
     # 曲名自动换行（文本区宽度 = CELL_W - 86 - 右侧 rating 留白 68）
     title_full = f"{title}{fit_mark}"
-    max_w = CELL_W - 86 - 68
+    max_w = CELL_W - 80 - 12
     lines = _wrap_title(title_full, font_s, max_w, max_lines=2)
     draw.text((tx, y + 10), lines[0], fill=TEXT, font=font_s)
     if len(lines) > 1:
@@ -172,7 +172,8 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
         rating = rec["fitting_rating"]
     else:
         rating = rec.get("rating") or 0
-    draw.text((x + CELL_W - 10, y + 12), _fmt_rating2(_rating_to_float(rating)),
+    ry = score_y  # 与分数同一行，右下角
+    draw.text((x + CELL_W - 10, ry + 2), _fmt_rating2(_rating_to_float(rating)),
               fill=ACCENT, font=font_s, anchor="ra")
 
 
