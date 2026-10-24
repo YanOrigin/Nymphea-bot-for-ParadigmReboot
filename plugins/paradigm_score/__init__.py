@@ -502,7 +502,11 @@ async def handle_b50(event: MessageEvent, arg: Message = CommandArg()):
         await query_score.finish(f"❌ 报告渲染失败：{e!r}")
 
     from nonebot.adapters.onebot.v11 import MessageSegment
-    total_line = f"总 Rating：{result['total']:.2f}"
+    def _trunc2(x: float) -> str:
+        scaled = int(x * 100 + 1e-9)
+        return f"{scaled // 100}.{scaled % 100:02d}"
+
+    total_line = f"总 Rating：{_trunc2(result['total'])}"
     await query_score.finish(
         Message([MessageSegment.text(f"📊 {title}\n{total_line}\n"),
                  MessageSegment.image(img_path.resolve().as_uri())])
