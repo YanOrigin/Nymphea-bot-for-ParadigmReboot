@@ -91,6 +91,48 @@ GAP = 10
 COLS = 4
 
 
+def _needs_two_lines(rec: dict) -> bool:
+    """该记录曲名是否需要两行（预判用，渲染时同样逻辑）"""
+    return False  # 占位：真实判断在渲染时由 _wrap_title 决定，这里保守返回 False 保持行高
+
+def _wrap_title(text: str, font, max_w: int, max_lines: int = 2) -> list[str]:
+    """曲名按像素宽度换行；最多 max_lines 行，超出末行加省略号。逐字符断行（适配中日文无空格）"""
+    if _text_w(text, font) <= max_w:
+        return [text]
+    lines, cur = [], ""
+    for ch in text:
+        if _text_w(cur + ch, font) > max_w:
+            lines.append(cur)
+            cur = ch
+            if len(lines) == max_lines:
+                break
+        else:
+            cur += ch
+    if len(lines) < max_lines and cur:
+        lines.append(cur)
+    # 超出：末行截断 + 省略号
+    if len(lines) == max_lines and (len(lines_ := lines) < 1 or _text_w(lines[-1], font) > max_w or _still_overflow(text, lines, font, max_w)):
+        last = lines[-1]
+        while last and _text_w(last + "…", font) > max_w:
+            last = last[:-1]
+        lines[-1] = last + "…"
+    return lines[:max_lines]
+
+
+def _still_overflow(original: str, lines: list[str], font, max_w: int) -> bool:
+    """判断是否还有未展示的文本（用于决定是否加省略号）"""
+    consumed = "".join(lines)
+    return len(consumed) < len(original)
+
+
+def _text_w(text: str, font) -> int:
+    try:
+        bbox = font.getbbox(text)
+        return bbox[2] - bbox[0]
+    except AttributeError:
+        return font.getsize(text)[0]
+
+
 def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
                rec: dict, cover: Image.Image | None, font_s, font_xs, fitting: bool = False):
     diff = (rec.get("chart") or {}).get("difficulty", "invaded")
@@ -108,15 +150,24 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
     # 文本区
     tx = x + 86
     chart = rec.get("chart") or {}
-    title = (chart.get("title") or "?")[:16]
+    title = chart.get("title") or "?"
     fit_mark = "*" if chart.get("fitting_rating") is not None and chart.get("fitting_level") is None else ""
-    draw.text((tx, y + 10), f"{title}{fit_mark}", fill=TEXT, font=font_s)
+    # 曲名自动换行（文本区宽度 = CELL_W - 86 - 右侧 rating 留白 68）
+    title_full = f"{title}{fit_mark}"
+    max_w = CELL_W - 86 - 68
+    lines = _wrap_title(title_full, font_s, max_w, max_lines=2)
+    draw.text((tx, y + 10), lines[0], fill=TEXT, font=font_s)
+    if len(lines) > 1:
+        draw.text((tx, y + 30), lines[1], fill=TEXT, font=font_s)
+        lv_y, score_y = y + 52, y + 70   # 两行曲名：定数/分数下移
+    else:
+        lv_y, score_y = y + 34, y + 52
     if fitting and chart.get("fitting_level") is not None:
         lv = chart["fitting_level"]  # 拟合模式显示拟合定数
     else:
         lv = chart.get("level") or 0  # 标准/全局模式：官方定数
-    draw.text((tx, y + 34), f"{diff} {lv:g}", fill=color, font=font_xs)
-    draw.text((tx, y + 52), _fmt_score(int(rec.get("score") or 0)), fill=TEXT_DIM, font=font_xs)
+    draw.text((tx, lv_y), f"{diff} {lv:g}", fill=color, font=font_xs)
+    draw.text((tx, score_y), _fmt_score(int(rec.get("score") or 0)), fill=TEXT_DIM, font=font_xs)
     if fitting and rec.get("fitting_rating") is not None:
         rating = rec["fitting_rating"]
     else:
@@ -144,7 +195,13 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
     heights = []
     for sec in sections:
         rows = (len(sec["records"]) + COLS - 1) // COLS
-        heights.append(sec_head_h + rows * (CELL_H + GAP) + 12)
+        # 有两行曲名的行需要额外高度：按每行最大单元格高度计算
+        extra = 0
+        for i in range(0, len(sec["records"]), COLS):
+            row_recs = sec["records"][i:i + COLS]
+            row_h = max((CELL_H + (18 if _needs_two_lines(r) else 0) for r in row_recs), default=CELL_H)
+            extra += row_h + GAP - (CELL_H + GAP)
+        heights.append(sec_head_h + rows * (CELL_H + GAP) + extra + 12)
     total_h = header_h + sum(heights) + margin * 2 + (30 if footer else 0)
 
     img = Image.new("RGB", (width, total_h), BG)
@@ -163,10 +220,15 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
         draw.text((margin, y + 8), sec["label"], fill=TEXT, font=f_sec)
         draw.text((width - margin, y + 10), f"AVG {_fmt_rating2(sec['avg'])}", fill=ACCENT, font=f_sub, anchor="ra")
         y += sec_head_h
+        row_y = y
         for i, rec in enumerate(sec["records"]):
             row, col = divmod(i, COLS)
+            if col == 0 and row > 0:
+                # 新行起点：累加之前每行的实际高度
+                prev_recs = sec["records"][max(0, i - COLS):i]
+                row_y += max((CELL_H + (18 if _needs_two_lines(r) else 0) for r in prev_recs), default=CELL_H) + GAP
             x = margin + col * (CELL_W + GAP)
-            cy = y + row * (CELL_H + GAP)
+            cy = row_y
             cover = covers.get((rec.get("chart") or {}).get("cover") or "")
             _draw_cell(img, draw, x, cy, rec, cover, f_s, f_xs, fitting)
         y += h
