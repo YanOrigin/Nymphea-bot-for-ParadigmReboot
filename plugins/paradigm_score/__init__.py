@@ -103,6 +103,7 @@ fetch_scores = on_command("更新成绩", rule=to_me(), priority=5, block=True)
 query_score = on_command("b50", rule=to_me(), priority=5, block=True)
 ad50_cmd = on_command("ad50", rule=to_me(), priority=5, block=True)
 fc50_cmd = on_command("fc50", rule=to_me(), priority=5, block=True)
+score_cmd = on_command("score", rule=to_me(), priority=5, block=True)
 
 
 def _mask_device(devid: str) -> str:
@@ -659,6 +660,205 @@ async def handle_ad50(event: MessageEvent):
 @fc50_cmd.handle()
 async def handle_fc50(event: MessageEvent):
     await _handle_judge50(event, "fc")
+
+
+# ---------- /score 单曲成绩（本地缓存） ----------
+
+_DIFF_ORDER = ("detected", "invaded", "massive", "reboot")
+
+
+# 曲库与别名库路径（与 alias_manager / song_query 共享同一批文件）
+_SONGS_FILE = Path("data/paradigm_songs.json")
+_ALIASES_FILE = Path("data/paradigm_aliases.json")
+
+
+def _load_song_kb() -> tuple[list[dict], dict]:
+    """加载曲库与 slug→wiki_id 修正表"""
+    try:
+        songs = json.loads(_SONGS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        songs = []
+    manual: dict = {}
+    try:
+        mp = Path(config.prp_tables_dir or "data/prp_tables") / "slug_wiki_manual_map.json"
+        if mp.exists():
+            manual = json.loads(mp.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        pass
+    return songs, manual
+
+
+def _resolve_song(query: str) -> tuple[dict | None, list[dict]]:
+    """三层解析：wiki_id → 曲名精确 → 别名/模糊（返回候选）"""
+    songs, _ = _load_song_kb()
+    if not songs:
+        return None, []
+    nq = "".join(query.split()).lower()
+
+    for s in songs:  # wiki_id
+        if (s.get("wiki_id") or "").lower() == nq:
+            return s, [s]
+    for s in songs:  # 曲名精确
+        if "".join(s.get("title", "").split()).lower() == nq:
+            return s, [s]
+
+    # 别名
+    alias_hits = []
+    try:
+        db = json.loads(_ALIASES_FILE.read_text(encoding="utf-8-sig"))
+        db = {k: v for k, v in db.items() if k != "_meta"}
+    except (json.JSONDecodeError, OSError):
+        db = {}
+    for wid, aliases in db.items():
+        if any("".join(a.split()).lower() == nq for a in aliases):
+            for s in songs:
+                if s.get("wiki_id") == wid:
+                    alias_hits.append(s)
+                    break
+    if len(alias_hits) == 1:
+        return alias_hits[0], alias_hits
+    if len(alias_hits) > 1:
+        return None, alias_hits[:8]
+
+    # 模糊
+    cands = [s for s in songs if nq in "".join(s.get("title", "").split()).lower()]
+    return None, cands[:8]
+
+
+def _collect_song_records(uid: str, song: dict) -> tuple[list[dict], list[str]]:
+    """从本地缓存取该曲四难度记录。返回 (渲染用记录, 缺少的难度列表)"""
+    wid = song.get("wiki_id") or ""
+    cache_path = _user_score_file(uid)
+    if not cache_path.exists():
+        return [], []
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    game_recs = cache.get("records", [])
+
+    _, manual = _load_song_kb()
+    # slug：wiki_id 本身，或反查人工映射表
+    slugs = {wid}
+    for slug, mapped_wid in manual.items():
+        if mapped_wid == wid:
+            slugs.add(slug)
+
+    by_diff: dict[str, dict] = {}
+    for r in game_recs:
+        cid = r.get("chart_id") or ""
+        parts = cid.split("/")
+        if len(parts) != 3:
+            continue
+        if parts[1] in slugs and parts[2] in _DIFF_ORDER:
+            by_diff[parts[2]] = r
+
+    # PRP rating（若已传分）
+    ratings: dict[str, int] = {}
+    try:
+        prp = _load_prp().get(uid)
+        if prp:
+            data = core.prp_api.fetch_b50(prp["username"])
+            for x in data.get("records", []):
+                c = x.get("chart") or {}
+                if c.get("wiki_id") == wid:
+                    ratings[c.get("difficulty") or ""] = x.get("rating") or 0
+    except Exception:
+        pass
+
+    out, missing = [], []
+    no_rating = []
+    levels = song.get("levels") or {}
+    for diff in _DIFF_ORDER:
+        rec = by_diff.get(diff)
+        if not rec:
+            if diff in levels:
+                missing.append(diff)
+            continue
+        if not ratings.get(diff):
+            no_rating.append(diff)
+        out.append({
+            "score": rec.get("score") or 0,
+            "rating": ratings.get(diff, 0),
+            "chart": {
+                "id": 0,
+                "title": song.get("title") or "?",
+                "cover": song.get("cover") or "",
+                "difficulty": diff,
+                "level": levels.get(diff) or 0,
+                "b15": False,
+            },
+        })
+    return out, missing, no_rating
+
+
+@score_cmd.handle()
+async def handle_score(event: MessageEvent, arg: Message = CommandArg()):
+    query = arg.extract_plain_text().strip()
+    if not query:
+        await score_cmd.finish("用法：/score <曲名|别名|Wiki ID>\n（数据来自本地成绩缓存，需先 /更新成绩）")
+
+    uid = str(event.user_id)
+    cache_path = _user_score_file(uid)
+    if not cache_path.exists():
+        await score_cmd.finish("还没有成绩缓存，请先 /更新成绩 拉取一次游戏成绩")
+
+    song, cands = _resolve_song(query)
+    if not song:
+        if cands:
+            lines = [f"「{query}」匹配到 {len(cands)} 首，请用 Wiki ID 精确查询：", ""]
+            for i, s in enumerate(cands, 1):
+                lines.append(f"{i}. {s['title']}  [{s.get('wiki_id', '')}]")
+            lines.append("")
+            lines.append(f"例：/score {cands[0].get('wiki_id', '')}")
+            await score_cmd.finish("\n".join(lines))
+        await score_cmd.finish(f"未找到与「{query}」匹配的歌曲")
+
+    await score_cmd.send("⏳ 正在查询单曲成绩……")
+    try:
+        records, missing, no_rating = await asyncio.to_thread(_collect_song_records, uid, song)
+    except Exception as e:
+        logger.exception("score 查询失败")
+        await score_cmd.finish(f"❌ 查询异常：{e!r}")
+
+    if not records:
+        await score_cmd.finish(
+            f"你没有「{song['title']}」的游玩记录（本地缓存中未找到）\n"
+            f"提示：/更新成绩 可刷新，或确认曲目是否正确"
+        )
+
+    sections = [{"label": song["title"], "avg": 0.0, "records": records}]
+    out = _SCORES_DIR / f"score_{uid}_{song.get('wiki_id', 'x')}.jpg"
+    try:
+        _qt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        img_path = await core.b50_render.render_b50_image(
+            str(event.user_id), str(event.user_id),
+            sections, 0.0, f"Paradigm: Reboot · {song['title']}", out,
+            footer=f"单曲成绩 · {song.get('artist') or ''}",
+            fitting=False,
+            query_time=_qt,
+            hide_total=True,
+        )
+    except Exception as e:
+        logger.exception("score 渲染失败")
+        await score_cmd.finish(f"❌ 渲染失败：{e!r}")
+
+    from nonebot.adapters.onebot.v11 import MessageSegment
+    notes = []
+    if missing:
+        notes.append(f"未游玩：{'、'.join(missing)}")
+    if no_rating:
+        notes.append(f"未传分（rating 显示 0.00）：{'、'.join(no_rating)}")
+    note = ("\n（" + "；".join(notes) + "）") if notes else ""
+    levels = song.get("levels") or {}
+    lv_txt = " | ".join(f"{d} {levels[d]:g}" for d in _DIFF_ORDER if d in levels)
+    await score_cmd.finish(
+        Message([
+            MessageSegment.text(
+                f"🎵 {song['title']}\n"
+                f"{song.get('artist') or ''}\n"
+                f"{lv_txt}{note}\n"
+            ),
+            MessageSegment.image(img_path.resolve().as_uri()),
+        ])
+    )
 
 
 _PRP_FILE = Path(config.prp_accounts_file)
