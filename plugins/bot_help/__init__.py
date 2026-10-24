@@ -43,6 +43,8 @@ BRIEF = """📖 Nymphea 使用指南
 /更新成绩 —— 拉取成绩并自动传分（6h 冷却）
 /绑定prp <用户名> <上传token> —— 绑定 PRP 账号
 /b50 [模式] —— B50 报告图（standard/overflow/global，前缀 f=拟合定数）
+/ad50 —— AD（All Perfect）成绩 Rating 前 50
+/fc50 —— Full Combo 成绩 Rating 前 50
 /范式解绑 —— 解除游戏账号绑定
 
 💡 群聊请先 @我；各指令详细用法见下方卡片 👇"""
@@ -80,6 +82,13 @@ CARD_NODES: list[str] = [
     "  拟合定数重算（无拟合定数的谱面标 * 回退官方）\n"
     "· 报告含总 Rating、各池均分与每谱面 Rating\n"
     "· Rating 由 PRP 服务器计算，与游戏内一致",
+    "【查分 · 判定成绩榜】\n\n"
+    "· /ad50 —— 统计所有达成 AD（All Perfect，\n"
+    "  即 0 Good · 0 Miss）的谱面，按 Rating 取前 50\n"
+    "· /fc50 —— 统计所有达成 Full Combo（0 Miss）\n"
+    "  的谱面，按 Rating 取前 50\n\n"
+    "⚠️ 判定数据来自游戏成绩，需先 /更新成绩 拉取过\n"
+    "   （rating 来自 PRP，需 /传分 过对应谱面）",
     "【· ω ·】\n祝游玩愉快～ 有问题请联系 bot 主人",
 ]
 
