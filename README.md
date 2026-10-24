@@ -108,6 +108,25 @@ cd D:\Developed\Nymphea-bot
   - **游戏成绩拉取 6 小时冷却**（每账号，防频繁登录触发风控）；冷却内提示下次可拉取时间；`/传分`（PRP 侧）与 `/b50`（只读）不受限
   - **查分引擎已拆分**至私有库 YanOrigin/ParadigmReboot-Tracker（游戏协议+密钥不入公开库）；插件通过 `core_loader` 动态加载（私有库优先 → 内置副本兜底），未安装时查分指令优雅降级
 
+## 数据维护（maintenance.py）
+
+每周一 04:30 由计划任务 `NympheaMaintenance` 自动执行（`RunLevel=Limited`，无 UAC）：
+
+- **日志轮转**：`logs/*.log` 压缩归档到 `logs/archive/<name>_<YYYY>W<WW>.log.gz`，保留最近 8 份。
+  同周重复执行会**追加**到同一归档（gzip 多 member 串接，可正常解压全部内容）。
+  轮转需独占日志文件，因此流程为：停 bot → 归档 → 清空 → 启 bot（实测总停机约 7 秒）
+- **运势归档**：`data/fortune_data.json` 中早于 **3 个月**的签文移入 `data/archive/fortune_before_<YYYY-MM-DD>.json.gz`，
+  按截止日期分文件、同名归档自动合并。保留近期数据以确保「脱凶检测」（依赖昨日记录）正常
+
+手动执行：
+
+```powershell
+.venv\Scripts\python.exe maintenance.py             # 全部维护
+.venv\Scripts\python.exe maintenance.py --logs      # 只轮转日志
+.venv\Scripts\python.exe maintenance.py --fortune   # 只归档运势
+.venv\Scripts\python.exe maintenance.py --dry-run   # 预览
+```
+
 ## 文档
 
 - NoneBot: https://nonebot.dev/
