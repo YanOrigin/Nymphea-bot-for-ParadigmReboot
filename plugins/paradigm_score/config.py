@@ -30,6 +30,10 @@ class Config(BaseModel):
     tracker_core_dir: str = Field(default="", validation_alias="tracker_core_dir")
     # 游戏成绩拉取冷却（秒）；0 = 不冷却。PRP 查询不受此限制
     fetch_cooldown: int = Field(default=6 * 3600, validation_alias="fetch_cooldown")
+    # 快爆网页授权中转（Cloudflare Worker）地址
+    auth_relay_base: str = Field(default="", validation_alias="auth_relay_base")
+    # 中转服务的 AUTH_SECRET
+    auth_relay_secret: str = Field(default="", validation_alias="auth_relay_secret")
 
 
 config = get_plugin_config(Config)
