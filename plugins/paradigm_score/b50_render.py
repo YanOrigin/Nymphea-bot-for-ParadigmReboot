@@ -87,7 +87,7 @@ def _load_cover_sync(filename: str, cache_dir: Path, size: int) -> Image.Image |
 # ---------- 单元格 ----------
 
 CELL_W = 558   # 372 * 1.5
-CELL_H = 144   # 96 * 1.5
+CELL_H = 164   # 曲绘 144 + 上下各 10 内边距
 GAP = 15
 COLS = 5
 
@@ -143,26 +143,30 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
     draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=12, fill=CARD_BG)
     # 左侧难度色条
     draw.rounded_rectangle([x, y, x + 7, y + CELL_H], radius=3, fill=color)
-    # 曲绘 96x96
+    # 曲绘 144x144（1.5x）
+    CV = 144
+    cv_x = x + 18
+    cv_y = y + (CELL_H - CV) // 2  # 居中，上下各留 10px
     if cover:
-        img.paste(cover, (x + 21, y + 24))
+        img.paste(cover, (cv_x, cv_y))
     else:
-        draw.rounded_rectangle([x + 21, y + 24, x + 21 + 96, y + 24 + 96], radius=6, fill=FALLBACK_COVER)
-        draw.ellipse([x + 55, y + 60, x + 71, y + 76], fill=TEXT_DIM)
+        draw.rounded_rectangle([cv_x, cv_y, cv_x + CV, cv_y + CV], radius=8, fill=FALLBACK_COVER)
+        cr = cv_x + CV // 2
+        draw.ellipse([cr - 12, cv_y + CV // 2 - 12, cr + 12, cv_y + CV // 2 + 12], fill=TEXT_DIM)
     # 文本区
-    tx = x + 132
+    tx = x + 18 + CV + 18
     chart = rec.get("chart") or {}
     title = chart.get("title") or "?"
     fit_mark = "*" if chart.get("fitting_rating") is not None and chart.get("fitting_level") is None else ""
     title_full = f"{title}{fit_mark}"
-    max_w = CELL_W - 132 - 18
+    max_w = CELL_W - (18 + 144 + 18) - 18
     lines = _wrap_title(title_full, f_title, max_w, max_lines=2)
-    draw.text((tx, y + 14), lines[0], fill=TEXT, font=f_title)
+    draw.text((tx, y + 8), lines[0], fill=TEXT, font=f_title)
     if len(lines) > 1:
-        draw.text((tx, y + 44), lines[1], fill=TEXT, font=f_title)
-        lv_y, score_y = y + 74, y + 106
+        draw.text((tx, y + 36), lines[1], fill=TEXT, font=f_title)
+        lv_y, score_y = y + 72, y + 108
     else:
-        lv_y, score_y = y + 58, y + 96
+        lv_y, score_y = y + 60, y + 100
     if fitting and chart.get("fitting_level") is not None:
         lv = chart["fitting_level"]
     else:
@@ -187,10 +191,10 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
     f_sec = _font(33, bold=True)
     f_big = _font(56, bold=True)
     f_label = _font(21)
-    # 单元格字号：曲名保持最初版本 16pt（用户要求），其余等比稍放大
-    f_cell_title = _font(16)
-    f_cell_small = _font(18)
-    f_cell_rating = _font(20)
+    # 单元格字号：曲名 16*1.2≈19pt，其余 18/20 *1.5 = 27/30pt
+    f_cell_title = _font(19)
+    f_cell_small = _font(27)
+    f_cell_rating = _font(30)
 
     margin = 40
     header_h = 132
@@ -249,7 +253,7 @@ async def render_b50_image(username: str, nickname: str, sections: list[dict],
         for r in all_recs:
             fn = (r.get("chart") or {}).get("cover") or ""
             if fn and fn not in covers:
-                covers[fn] = _load_cover_sync(fn, cache_dir, 64)
+                covers[fn] = _load_cover_sync(fn, cache_dir, 144)
         return covers
 
     covers = await asyncio.to_thread(_fetch_all)
