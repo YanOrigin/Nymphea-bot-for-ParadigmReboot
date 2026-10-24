@@ -35,6 +35,7 @@ from nonebot.plugin import PluginMetadata
 
 from .config import Config, config
 from .core_loader import get_core
+from . import auth_server
 
 core, _core_src = get_core()  # 查分引擎（私有库优先，内置副本兜底）
 
@@ -239,80 +240,63 @@ async def _do_bind(matcher, uid: str, creds: dict, source_note: str = ""):
     )
 
 
-# ---------- 网页授权绑定（快爆：Cloudflare Worker 中转） ----------
+# ---------- 网页授权绑定（快爆：bot 内嵌授权服务器，IPv6 直连） ----------
 
-AUTH_BASE = config.auth_relay_base  # Worker 地址，如 https://paradigm-auth-relay.xxx.workers.dev
-AUTH_SECRET = config.auth_relay_secret
-
-
-def _relay_create(qq: str) -> str:
-    """向 Worker 请求一次性授权令牌"""
-    body = json.dumps({"secret": AUTH_SECRET, "qq": qq}).encode()
-    req = urllib.request.Request(f"{AUTH_BASE}/api/create", data=body,
-        headers={"Content-Type": "application/json", "User-Agent": "NympheaBot/0.1"}, method="POST")
-    with urllib.request.urlopen(req, timeout=15) as r:
-        d = json.loads(r.read().decode())
-    if "token" not in d:
-        raise RuntimeError(f"中转服务响应异常: {d}")
-    return d["token"]
+_auth_server = None  # 懒加载的授权服务器实例
 
 
-def _relay_poll(token: str) -> dict:
-    """查询授权结果。status: pending/done/expired"""
-    req = urllib.request.Request(f"{AUTH_BASE}/api/result/{token}",
-        headers={"User-Agent": "NympheaBot/0.1"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read().decode())
+def _get_auth_server():
+    global _auth_server
+    if _auth_server is None:
+        _auth_server = auth_server.AuthServer(port=18964)
+        _auth_server.start()
+        logger.info(f"授权服务器已启动: {_auth_server.base_url}")
+    return _auth_server
 
 
 @bind_token.handle()
 async def handle_bind(event: MessageEvent):
-    """快爆网页授权：生成专属链接 → 用户浏览器登录 → bot 轮询取凭据自动绑定"""
-    if not AUTH_BASE or not AUTH_SECRET:
-        await bind_token.finish("⚠️ 授权中转服务未配置（bot 主人设置 AUTH_RELAY_* 后可用）")
+    """快爆网页授权：bot 起本地授权服务器 → 用户手机 IPv6 直连登录 → 自动绑定"""
     uid = str(event.user_id)
     try:
-        token = await asyncio.to_thread(_relay_create, uid)
-    except Exception as e:
-        await bind_token.finish(f"❌ 授权服务暂不可用：{e!r}")
+        server = await asyncio.to_thread(_get_auth_server)
+    except OSError as e:
+        await bind_token.finish(f"❌ 授权服务器启动失败（端口占用？）：{e!r}")
 
-    link = f"{AUTH_BASE}/auth/{token}"
+    token = uuid.uuid4().hex[:16]
+    server.new_token(token)
+    link = f"{server.base_url}/?t={token}"
     await bind_token.send(
         "🔐 快爆账号授权（手机号 + 短信验证码，全程不接触密码）：\n"
         f"{link}\n\n"
-        "⏳ 等待你在浏览器中完成登录（10 分钟内有效）……"
+        "⏳ 等待你在浏览器中完成登录（10 分钟内有效）……\n"
+        "（手机请用流量或与 bot 同网络的 WiFi 打开）"
     )
 
-    # 轮询最多 10 分钟（Worker 侧 TTL 同步）
     deadline = time.time() + 600
     while time.time() < deadline:
-        await asyncio.sleep(6)
-        try:
-            r = await asyncio.to_thread(_relay_poll, token)
-        except Exception as e:
-            logger.warning(f"授权轮询失败: {e!r}")
+        await asyncio.sleep(5)
+        r = server.poll(token)
+        if r["status"] == "pending":
             continue
-        if r.get("status") == "pending":
-            continue
-        if r.get("status") == "expired":
-            await bind_token.finish("⌛ 授权超时（10 分钟），请重新 /范式绑定")
-        if r.get("status") == "done":
+        if r["status"] == "expired":
+            await bind_token.finish("⌛ 授权链接已失效，请重新 /范式绑定")
+        if r["status"] == "done":
             payload = r.get("payload") or {}
             uid_hykb = str(payload.get("userId") or payload.get("uid") or "")
             if not uid_hykb:
                 await bind_token.finish("❌ 授权数据异常（缺 uid），请重新 /范式绑定")
-            # 组装凭据：credential-only（bot 自动续期 Session）+ 独立设备指纹
             creds = {
                 "uid": uid_hykb,
                 "hykb_credential": payload,
-                "deviceid": str(uuid.uuid4()),  # 每账号终身一个，首次持久化
+                "deviceid": uuid.uuid4().hex,  # 每账号终身一个独立设备指纹
             }
             await _do_bind(bind_token, uid, creds,
                            source_note="\n（来源：网页授权，快爆长期凭据已保存）")
     await bind_token.finish("⌛ 授权等待超时（10 分钟），请重新 /范式绑定")
 
 
-# ---------- 击弦绑定（iOS/外服：手机号+密码） ----------
+# ---------- 击弦绑定（iOS/外服：手机号+密码） ----------# ---------- 击弦绑定（iOS/外服：手机号+密码） ----------
 
 
 @bind_ios.handle()
