@@ -88,8 +88,6 @@ CARD_NODES: list[str] = [
     "· /fb50 / foverflow / fglobal —— 使用\n"
     "  拟合定数重算（无拟合定数的谱面标 * 回退官方）\n"
     "· 报告含总 Rating、各池均分与每谱面 Rating\n"
-    "· 总 Rating = Σ50 格 ÷ 50（B15 未填满时\n"
-    "  空位按 0 计，图上会标注 Σn/50）\n"
     "· Rating 由 PRP 服务器计算，与游戏内一致",
     "【查分 · 判定成绩榜】\n\n"
     "· /ad50 —— 统计所有达成 AD（All Perfect，\n"
