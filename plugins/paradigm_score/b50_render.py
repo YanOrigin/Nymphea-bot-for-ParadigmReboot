@@ -87,9 +87,109 @@ def _load_cover_sync(filename: str, cache_dir: Path, size: int) -> Image.Image |
 # ---------- 单元格 ----------
 
 CELL_W = 558   # 372 * 1.5
-CELL_H = 164   # 曲绘 144 + 上下各 10 内边距
+CELL_H = 216   # 拉高：容纳底部 AD/FC 徽章行
 GAP = 15
 COLS = 5
+
+
+# ---------- 图标资源（data/icons/） ----------
+
+def _find_icon_dir() -> Path:
+    r"""图标目录：自适应 bot 副本与 Tracker core 两种位置
+
+    bot 副本   : D:\Developed\Nymphea-bot\plugins\paradigm_score\b50_render.py
+                 → parents[2] = D:\Developed\Nymphea-bot  → data/icons ✓
+    Tracker core: D:\Developed\ParadigmReboot-Tracker\core\b50_render.py
+                 → parents[2] = D:\Developed  → 需再拼 Nymphea-bot/data/icons
+    """
+    here = Path(__file__).resolve()
+    p2 = here.parents[2] if len(here.parents) > 2 else here.parent
+    candidates = [
+        p2 / "data" / "icons",                       # bot 副本
+        p2 / "Nymphea-bot" / "data" / "icons",       # Tracker core（同级有 Nymphea-bot）
+        here.parent / "icons",                       # 万一放在 core/icons
+        Path(r"D:\Developed\Nymphea-bot\data\icons"),  # 绝对兜底
+    ]
+    for c in candidates:
+        try:
+            if c.exists() and next(c.rglob("*.png"), None) is not None:
+                return c
+        except OSError:
+            continue
+    return candidates[-1]
+
+
+ICON_DIR = _find_icon_dir()
+_icon_cache: dict[str, Image.Image] = {}
+
+# 评级标识文件名前缀（从高到低）
+RANK_ORDER = ("MAAAPLUS", "MAAA", "MAAPLUS", "MAA", "MAPLUS", "MA", "MB", "MC", "MD", "MINFPLUS", "MINF")
+
+# 评级分数段（用户提供，从高到低匹配：分数 >= 阈值即该档）
+# 注：MB / MC / MD 三档的分数线用户尚未提供，暂按每档递减 30,000 估算，待补正
+RANK_THRESHOLDS: list[tuple[str, int]] = [
+    ("MINFPLUS", 1009000),   # 1,009,000 ~ 1,010,000（最高）
+    ("MINF", 1000000),       # 1,000,000 ~ 1,008,999（跨百万）
+    ("MAAAPLUS", 990000),    #   990,000 ~   999,999
+    ("MAAA", 980000),        #   980,000 ~   989,999
+    ("MAAPLUS", 970000),     #   970,000 ~   979,999
+    ("MAA", 950000),         #   950,000 ~   969,999
+    ("MAPLUS", 930000),      #   930,000 ~   949,999
+    ("MA", 900000),          #   900,000 ~   929,999（A，90 万）
+    ("MB", 870000),          # 以下三档为估算值，待用户确认
+    ("MC", 840000),
+    ("MD", 800000),
+    ("MINF_FALLBACK_UNUSED", 0),  # 兜底：低于 MD 一律按 MD 显示
+]
+
+
+def _grade_for_score(score: int) -> str:
+    """分数 → 评级标识名（低于最低档一律返回 MD）"""
+    for name, threshold in RANK_THRESHOLDS:
+        if name.endswith("_UNUSED"):
+            continue
+        if score >= threshold:
+            return name
+    return "MD"
+
+
+def _load_icon(kind: str, name: str) -> Image.Image | None:
+    """加载图标（kind: 'rank' | 'achievement'），带缓存。name 可含或不含数字后缀"""
+    key = f"{kind}/{name}"
+    if key in _icon_cache:
+        return _icon_cache[key]
+    d = ICON_DIR / ("rank" if kind == "rank" else "achievement")
+    if not d.exists():
+        return None
+    # 精确命中；否则按前缀找（文件名形如 MAAAPLUS_350.png）
+    cand = None
+    exact = d / f"{name}.png"
+    if exact.exists():
+        cand = exact
+    else:
+        for p in d.glob("*.png"):
+            if p.stem.split("_")[0] == name:
+                cand = p
+                break
+    if not cand:
+        return None
+    try:
+        im = Image.open(cand).convert("RGBA")
+        _icon_cache[key] = im
+        return im
+    except Exception:
+        return None
+
+
+def _paste_icon(img: Image.Image, icon: Image.Image | None, box: tuple[int, int, int, int]):
+    """等比缩放贴图到指定矩形（居中对齐），保持透明"""
+    if icon is None:
+        return
+    bx, by, bw, bh = box
+    ratio = min(bw / icon.width, bh / icon.height)
+    nw, nh = max(1, int(icon.width * ratio)), max(1, int(icon.height * ratio))
+    resized = icon.resize((nw, nh), Image.LANCZOS)
+    img.paste(resized, (bx + (bw - nw) // 2, by + (bh - nh) // 2), resized)
 
 
 def _needs_two_lines(rec: dict) -> bool:
@@ -137,48 +237,88 @@ def _text_w(text: str, font) -> int:
 def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
                rec: dict, cover: Image.Image | None, f_title, f_small, f_rating,
                fitting: bool = False):
+    """新版式：曲绘 | 曲名 / 定数 / 评级+分数 ；底部 AD/FC 徽章 + 单曲 rating"""
     diff = (rec.get("chart") or {}).get("difficulty", "invaded")
     color = DIFF_COLORS.get(diff, (120, 120, 120))
-    # 卡片底
+    chart = rec.get("chart") or {}
+    score = int(rec.get("score") or 0)
+
+    # 卡片底 + 左侧色条
     draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=12, fill=CARD_BG)
-    # 左侧难度色条
     draw.rounded_rectangle([x, y, x + 7, y + CELL_H], radius=3, fill=color)
-    # 曲绘 144x144（1.5x）
+
+    # ---- 曲绘（144x144，垂直居中于上半区）----
     CV = 144
     cv_x = x + 18
-    cv_y = y + (CELL_H - CV) // 2  # 居中，上下各留 10px
+    cv_y = y + 16
     if cover:
         img.paste(cover, (cv_x, cv_y))
     else:
         draw.rounded_rectangle([cv_x, cv_y, cv_x + CV, cv_y + CV], radius=8, fill=FALLBACK_COVER)
         cr = cv_x + CV // 2
         draw.ellipse([cr - 12, cv_y + CV // 2 - 12, cr + 12, cv_y + CV // 2 + 12], fill=TEXT_DIM)
-    # 文本区
+
+    # ---- 右侧文本区 ----
     tx = x + 18 + CV + 18
-    chart = rec.get("chart") or {}
+    right_pad = 18
+    text_w = CELL_W - (18 + CV + 18) - right_pad
+
+    # 行1：曲名（可两行）
     title = chart.get("title") or "?"
     fit_mark = "*" if chart.get("fitting_rating") is not None and chart.get("fitting_level") is None else ""
-    title_full = f"{title}{fit_mark}"
-    max_w = CELL_W - (18 + 144 + 18) - 18
-    lines = _wrap_title(title_full, f_title, max_w, max_lines=2)
-    draw.text((tx, y + 8), lines[0], fill=TEXT, font=f_title)
-    if len(lines) > 1:
-        draw.text((tx, y + 36), lines[1], fill=TEXT, font=f_title)
-        lv_y, score_y = y + 72, y + 108
-    else:
-        lv_y, score_y = y + 60, y + 100
+    lines = _wrap_title(f"{title}{fit_mark}", f_title, text_w, max_lines=2)
+    draw.text((tx, y + 14), lines[0], fill=TEXT, font=f_title)
+    title_rows = len(lines)
+    if title_rows > 1:
+        draw.text((tx, y + 42), lines[1], fill=TEXT, font=f_title)
+
+    # 行2：难度定数
+    lv_y = y + (14 if title_rows == 1 else 42) + 44
     if fitting and chart.get("fitting_level") is not None:
         lv = chart["fitting_level"]
     else:
         lv = chart.get("level") or 0
     draw.text((tx, lv_y), f"{diff} {lv:g}", fill=color, font=f_small)
-    # 第三行：分数（左） + 单曲 rating（右）
-    draw.text((tx, score_y), _fmt_score(int(rec.get("score") or 0)), fill=TEXT_DIM, font=f_small)
+
+    # 行3：评级标识 + 游玩分数
+    row3_y = lv_y + 40
+    grade_name = _grade_for_score(score)
+    rank_icon = _load_icon("rank", grade_name)
+    if rank_icon is not None:
+        _paste_icon(img, rank_icon, (tx - 6, row3_y - 16, 220, 78))
+        score_x = tx + 224
+    else:
+        # 无图标时退回文字评级
+        draw.text((tx, row3_y), grade_name, fill=ACCENT, font=f_small)
+        score_x = tx + 224
+    draw.text((score_x, row3_y + 2), _fmt_score(score), fill=TEXT_DIM, font=f_small)
+
+    # ---- 底部徽章行：AD / FC ----
+    badge_y = y + CELL_H - 62
+    lost = int(rec.get("_judge", {}).get("lost", 0)) if rec.get("_judge") else None
+    received = int(rec.get("_judge", {}).get("received", 0)) if rec.get("_judge") else None
+
+    # 判定信息存在时按判定显示；不存在时按分数推导（1009000+ 视为 AP/FC 候选）
+    if lost is not None:
+        is_fc = lost == 0
+        is_ad = is_fc and (received or 0) == 0
+    else:
+        is_ad = score >= 1009000
+        is_fc = is_ad or score >= 1000000
+
+    bx = tx - 4
+    if is_ad:
+        _paste_icon(img, _load_icon("achievement", "AD徽章小图"), (bx, badge_y - 6, 128, 56))
+        bx += 136
+    if is_fc:
+        _paste_icon(img, _load_icon("achievement", "FC徽章小图"), (bx, badge_y - 6, 128, 56))
+
+    # ---- 右下：单曲 rating ----
     if fitting and rec.get("fitting_rating") is not None:
         rating = rec["fitting_rating"]
     else:
         rating = rec.get("rating") or 0
-    draw.text((x + CELL_W - 18, score_y + 2), _fmt_rating2(_rating_to_float(rating)),
+    draw.text((x + CELL_W - right_pad, y + CELL_H - 40), _fmt_rating2(_rating_to_float(rating)),
               fill=ACCENT, font=f_rating, anchor="ra")
 
 
