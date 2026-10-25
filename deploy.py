@@ -107,10 +107,16 @@ texts = {}
 for mod_name in ("b50_render", "prd_api", "prp_api"):
     mod = getattr(core, mod_name, None)
     if mod is not None:
-        texts[f"{src}\\{mod_name}"] = inspect.getsource(mod)
-plugin_file = bot / "plugins" / "paradigm_score" / "__init__.py"
-if plugin_file.exists():
-    texts[str(plugin_file)] = plugin_file.read_text(encoding="utf-8")
+        texts[str(Path(src) / (mod_name + ".py"))] = inspect.getsource(mod)
+# 插件层：全部 .py 都纳入（含 at_reply 这类全局补丁）
+plug_root = bot / "plugins"
+for p in plug_root.rglob("*.py"):
+    if "__pycache__" in p.parts:
+        continue
+    try:
+        texts[str(p)] = p.read_text(encoding="utf-8")
+    except OSError:
+        pass
 hit = [loc for loc, tx in texts.items() if expect in tx]
 print("SRC:", hit[0] if hit else src)
 print("HAS:", bool(hit))
