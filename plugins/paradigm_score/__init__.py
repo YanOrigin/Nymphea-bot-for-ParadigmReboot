@@ -4,13 +4,13 @@
     /范式登录            从本机登录工具读取凭据自动绑定游戏账号（推荐，主人用）
     /范式绑定 <凭据>     手动绑定游戏凭据（建议私聊）
     /范式解绑            删除游戏凭据与成绩缓存
-    /更新成绩            拉取全量最佳成绩并缓存 + 自动传分 PRP（6h 冷却）
+    /更新成绩            拉取全量最佳成绩并缓存 + 自动传分 PRP（4h 冷却）
     /绑定prp <用户名> <上传token>   绑定 PRP 账号（查分前置条件）
     /传分                手动触发一次传分（不受冷却限制；幂等覆盖）
     /b50 [模式]          B50 报告图（standard/overflow/global；前缀 f=拟合定数）
 
 冷却规则：
-    - 游戏成绩拉取（/更新成绩 与绑定验证）每账号 6 小时一次（防风控封号）
+    - 游戏成绩拉取（/更新成绩 与绑定验证）每账号 4 小时一次（防风控封号）
     - 冷却内请求会提示下次可拉取时间；/传分（PRP 侧）与 /b50（只读）不受限
 
 安全规则：
@@ -45,7 +45,7 @@ __plugin_meta__ = PluginMetadata(
     usage=(
         "/范式绑定            快爆账号网页授权绑定（点链接登录即可）\n"
         "/范式绑定ios <手机号> <密码>  击弦账号绑定（iOS/外服）\n"
-        "/更新成绩            拉取你的最佳成绩列表并自动传分（6h 冷却）\n"
+        "/更新成绩            拉取你的最佳成绩列表并自动传分（4h 冷却）\n"
         "/绑定prp <用户名> <上传token>   绑定 PRP 账号\n"
         "/传分                手动传分（不受冷却限制）\n"
         "/b50 [模式]          生成 B50 报告图\n"
@@ -380,7 +380,7 @@ async def handle_fetch(event: MessageEvent):
     if not creds:
         await fetch_scores.finish("未绑定游戏账号，请先 /范式绑定（快爆）或 /范式绑定ios（iOS/外服）")
 
-    # 游戏侧 6h 冷却（防风控）
+    # 游戏侧 4h 冷却（防风控）
     ok, note = _cooldown_check(uid)
     if not ok:
         await fetch_scores.finish(note)
@@ -676,7 +676,7 @@ async def _handle_judge50(event: MessageEvent, kind: str):
     if not sf.exists():
         await query_score.finish(
             f"{label} 需要判定数据，但你还没有成绩缓存。\n"
-            f"请先 /更新成绩 拉取一次游戏成绩（之后 6 小时内可直接查）"
+            f"请先 /更新成绩 拉取一次游戏成绩（之后 {config.fetch_cooldown // 3600} 小时内可直接查）"
         )
     cache = json.loads(sf.read_text(encoding="utf-8"))
     game_records = cache.get("records", [])
