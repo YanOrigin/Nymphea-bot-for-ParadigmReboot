@@ -317,8 +317,9 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
 
 def _render(sections: list[dict], username: str, nickname: str, total_rating: float,
             title: str, covers: dict, out_path: Path, footer: str = "", fitting: bool = False,
-            query_time: str | None = None, hide_total: bool = False) -> Path:
-    """sections: [{"label": "Best 35", "avg": 166.7, "records": [...]}]"""
+            query_time: str | None = None, hide_total: bool = False,
+            total_label: str = "TOTAL RATING") -> Path:
+    """sections: [{"label": "Best 35", "avg": 166.7, "slots": 35, "records": [...]}]"""
     f_title = _font(45, bold=True)
     f_sub = _font(27)
     f_sec = _font(33, bold=True)
@@ -350,14 +351,18 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
     draw.text((margin, 112), f"{nickname or username}  ·  {footer or 'Rating Report'}", fill=TEXT_DIM, font=f_sub)
     if not hide_total:
         draw.text((width - margin, 40), _fmt_rating2(total_rating), fill=ACCENT, font=f_big, anchor="ra")
-        draw.text((width - margin, 112), "TOTAL RATING", fill=TEXT_DIM, font=f_label, anchor="ra")
+        draw.text((width - margin, 112), total_label, fill=TEXT_DIM, font=f_label, anchor="ra")
     # 分隔线：位于昵称行下方（昵称 112 + 字高 36 = 148，留 24 余量）
     draw.line([(margin, 172), (width - margin, 172)], fill=(52, 58, 78), width=3)
 
     # ---- 分节 ----
     y = header_h + margin // 2
     for sec, h in zip(sections, heights):
-        draw.text((margin, y + 10), sec["label"], fill=TEXT, font=f_sec)
+        label = sec["label"]
+        slots = sec.get("slots")
+        if slots and len(sec["records"]) < slots:
+            label = f"{label}  ({len(sec['records'])}/{slots})"
+        draw.text((margin, y + 10), label, fill=TEXT, font=f_sec)
         if not hide_total:
             draw.text((width - margin, y + 18), f"AVG {_fmt_rating2(sec['avg'])}", fill=ACCENT, font=f_sub, anchor="ra")
         y += sec_head_h
@@ -379,7 +384,8 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
 async def render_b50_image(username: str, nickname: str, sections: list[dict],
                            total_rating: float, title: str, out_path: Path,
                            footer: str = "", fitting: bool = False,
-                           query_time: str | None = None, hide_total: bool = False) -> Path:
+                           query_time: str | None = None, hide_total: bool = False,
+                           total_label: str = "TOTAL RATING") -> Path:
     """异步入口：并发拉曲绘后渲染"""
     cache_dir = out_path.parent / "covers"
     all_recs = [r for sec in sections for r in sec["records"]]
@@ -394,5 +400,6 @@ async def render_b50_image(username: str, nickname: str, sections: list[dict],
 
     covers = await asyncio.to_thread(_fetch_all)
     return await asyncio.to_thread(
-        _render, sections, username, nickname, total_rating, title, covers, out_path, footer, fitting, query_time, hide_total
+        _render, sections, username, nickname, total_rating, title, covers, out_path, footer,
+        fitting, query_time, hide_total, total_label
     )
