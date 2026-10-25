@@ -500,7 +500,7 @@ def _fetch_b50_sections(username: str, mode: str, fitting: bool) -> dict:
     - global:   scope=best&sort=rating        → 全池前 50 单节
     fitting=True 时 sort_by=fitting_rating 且单元格显示 fitting_rating
 
-    total 恒为 Σ÷50；每节另给 avg（该池实际均值，不含空位）与 slots（该池容量）。
+    total 恒为 Σ÷50（空格按 0 计）；每节另给 avg（该池实际均值，不含空位）。
     """
     prp = core.prp_api
     sort = "fitting_rating" if fitting else "rating"
@@ -514,9 +514,8 @@ def _fetch_b50_sections(username: str, mode: str, fitting: bool) -> dict:
         recs.sort(key=lambda x: -_val(x))
         top = recs[:B50_SLOTS]
         avg = sum(_val(r) for r in top) / max(1, len(top)) / 100
-        sections = [{"label": "Best 50 (Global)", "avg": avg, "slots": B50_SLOTS, "records": top}]
+        sections = [{"label": "Best 50 (Global)", "avg": avg, "records": top}]
         total = _b50_total(top, _val)
-        filled = len(top)
     else:
         params = f"scope=b50&sort_by={sort}&order=desc"
         if mode == "overflow":
@@ -530,11 +529,10 @@ def _fetch_b50_sections(username: str, mode: str, fitting: bool) -> dict:
         avg15 = sum(_val(r) for r in top15) / max(1, len(top15)) / 100
         total = _b50_total(top35 + top15, _val)
         sections = [
-            {"label": "Best 35", "avg": avg35, "slots": B35_SLOTS, "records": top35},
-            {"label": "Best 15", "avg": avg15, "slots": B15_SLOTS, "records": top15},
+            {"label": "Best 35", "avg": avg35, "records": top35},
+            {"label": "Best 15", "avg": avg15, "records": top15},
         ]
-        filled = len(top35) + len(top15)
-    return {"sections": sections, "total": total, "filled": filled, "slots": B50_SLOTS}
+    return {"sections": sections, "total": total}
 
 
 @query_score.handle()
@@ -579,9 +577,6 @@ async def handle_b50(event: MessageEvent, arg: Message = CommandArg()):
 
     out = _SCORES_DIR / f"b50_{uid}_{mode}{'_fit' if fitting else ''}.jpg"
     title = f"Paradigm: Reboot B50{' · Fitted' if fitting else ''}"
-    # B50 未填满时在 TOTAL RATING 标签上标注分母，避免误读为"已经很高"
-    filled, slots = result.get("filled", 0), result.get("slots", B50_SLOTS)
-    total_label = "TOTAL RATING" if filled >= slots else f"TOTAL RATING  (Σ{filled}/50)"
     try:
         _qt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         img_path = await core.b50_render.render_b50_image(
@@ -590,7 +585,6 @@ async def handle_b50(event: MessageEvent, arg: Message = CommandArg()):
             footer=f"{mode_label}{fit_note} · PRP: {prp['username']}",
             fitting=fitting,
             query_time=_qt,
-            total_label=total_label,
         )
     except Exception as e:
         logger.exception("b50 render failed")
@@ -602,9 +596,6 @@ async def handle_b50(event: MessageEvent, arg: Message = CommandArg()):
         return f"{scaled // 100}.{scaled % 100:02d}"
 
     total_line = f"总 Rating：{_trunc2(result['total'])}"
-    if filled < slots:
-        total_line += f"（Σ{filled}/50 格，空位按 0 计）"
-        total_line += f"\n⚠️ B50 未填满：{slots - filled} 格空着，打满后总分会显著上升"
     await query_score.finish(
         Message([MessageSegment.text(f"📊 {title}\n{total_line}\n"),
                  MessageSegment.image(img_path.resolve().as_uri())])
