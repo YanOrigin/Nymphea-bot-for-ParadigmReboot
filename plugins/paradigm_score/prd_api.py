@@ -50,13 +50,18 @@ class PrdClient:
       - session 形态：{"session": "...", "uid": "..."} → 直接可用，过期需重新绑定
     """
 
-    def __init__(self, creds: dict, device_id: str | None = None, creds_saver=None):
+    def __init__(self, creds: dict, device_id: str | None = None, creds_saver=None,
+                 base_url: str | None = None, platform: str | None = None):
         self.creds = creds
         self.creds_saver = creds_saver  # 回调(dict)：session 轮换时持久化
         self.session = creds.get("session") or ""
         self.uid = str(creds.get("uid") or "")
         self.rvh = creds.get("rvh", "")
         self.device_id = device_id or creds.get("deviceid") or str(uuid.uuid4())
+        # 击弦(iOS)走 TUNER 端点 + iOS 头; 快爆(安卓)走 GAME_BASE
+        self.is_jixian = self.uid.startswith("jx_")
+        self.base = base_url or (TUNER_BASE if self.is_jixian else GAME_BASE)
+        self.platform = platform or ("iOS" if self.is_jixian else "Android")
         if not self.session or not self.uid:
             raise PrdAPIError("凭据缺少 session/uid")
 
@@ -88,15 +93,18 @@ class PrdClient:
         _require_key()
         headers = {
             "Content-Type": "application/octet-stream", "User-Agent": "BestHTTP",
-            "X-Session": self.session, "X-UID": self.uid,
-            "Authorization": "Bearer " + self.session,
+            "X-Session": self.session,
             "X-Api-Version": "1", "X-api-version": "1",
             "X-game-version": GAME_VERSION, "X-game-build": GAME_BUILD,
-            "X-platform": "Android", "X-Language": "zh",
+            "X-platform": self.platform, "X-Language": "zh",
             "X-Device-Id": self.device_id, "X-Data-Version": self.rvh,
         }
+        if not self.is_jixian:
+            # 快爆链需要 X-UID + Bearer; 击弦链不需要(原版实测)
+            headers["X-UID"] = self.uid
+            headers["Authorization"] = "Bearer " + self.session
         data = self._enc(body) if body is not None else None
-        req = urllib.request.Request(GAME_BASE + path, data=data, headers=headers, method=method)
+        req = urllib.request.Request(self.base + path, data=data, headers=headers, method=method)
         try:
             r = urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as e:
@@ -231,10 +239,12 @@ def fetch_best(creds: dict, creds_saver=None, timeout: int = 30) -> list[dict]:
 
     # 会话预热：新换的 session 首调重端点偶发 500/400（服务端异步开户），
     # 先打轻端点 /server/user/login 既能确认登录态又能稳定会话
-    try:
-        client.call("/server/user/login", timeout=timeout)
-    except PrdAPIError:
-        pass  # 预热失败不致命，主调用失败还有 credential 重试兜底
+    # (击弦链无需预热: 原版实测直接 get_best 即可)
+    if not client.is_jixian:
+        try:
+            client.call("/server/user/login", timeout=timeout)
+        except PrdAPIError:
+            pass  # 预热失败不致命，主调用失败还有 credential 重试兜底
 
     try:
         data = client.call("/server/play/get_best", timeout=timeout)
