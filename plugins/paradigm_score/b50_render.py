@@ -136,18 +136,15 @@ RANK_THRESHOLDS: list[tuple[str, int]] = [
     ("MAA", 950000),         #   950,000 ~   969,999
     ("MAPLUS", 930000),      #   930,000 ~   949,999
     ("MA", 900000),          #   900,000 ~   929,999（A，90 万）
-    ("MB", 870000),          # 以下三档为估算值，待用户确认
-    ("MC", 840000),
-    ("MD", 800000),
-    ("MINF_FALLBACK_UNUSED", 0),  # 兜底：低于 MD 一律按 MD 显示
+    ("MB", 850000),          #   850,000 ~   899,999（B）
+    ("MC", 800000),          #   800,000 ~   849,999（C）
+    ("MD", 0),               #         0 ~   799,999（D）
 ]
 
 
 def _grade_for_score(score: int) -> str:
-    """分数 → 评级标识名（低于最低档一律返回 MD）"""
+    """分数 → 评级标识名（MD 阈值为 0，必然命中，无需兜底）"""
     for name, threshold in RANK_THRESHOLDS:
-        if name.endswith("_UNUSED"):
-            continue
         if score >= threshold:
             return name
     return "MD"
@@ -285,12 +282,12 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
     grade_name = _grade_for_score(score)
     rank_icon = _load_icon("rank", grade_name)
     if rank_icon is not None:
-        _paste_icon(img, rank_icon, (tx - 6, row3_y - 16, 220, 78))
-        score_x = tx + 224
+        _paste_icon(img, rank_icon, (tx - 2, row3_y - 6, 110, 39))
+        score_x = tx + 116
     else:
         # 无图标时退回文字评级
         draw.text((tx, row3_y), grade_name, fill=ACCENT, font=f_small)
-        score_x = tx + 224
+        score_x = tx + 116
     draw.text((score_x, row3_y + 2), _fmt_score(score), fill=TEXT_DIM, font=f_small)
 
     # ---- 底部徽章行：AD / FC ----
@@ -298,20 +295,16 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
     lost = int(rec.get("_judge", {}).get("lost", 0)) if rec.get("_judge") else None
     received = int(rec.get("_judge", {}).get("received", 0)) if rec.get("_judge") else None
 
-    # 判定信息存在时按判定显示；不存在时按分数推导（1009000+ 视为 AP/FC 候选）
+    # 仅在【有真实判定数据】时显示 AD/FC 徽章（避免无缓存用户被误导）
     if lost is not None:
         is_fc = lost == 0
         is_ad = is_fc and (received or 0) == 0
-    else:
-        is_ad = score >= 1009000
-        is_fc = is_ad or score >= 1000000
-
-    bx = tx - 4
-    if is_ad:
-        _paste_icon(img, _load_icon("achievement", "AD徽章小图"), (bx, badge_y - 6, 128, 56))
-        bx += 136
-    if is_fc:
-        _paste_icon(img, _load_icon("achievement", "FC徽章小图"), (bx, badge_y - 6, 128, 56))
+        bx = tx - 4
+        if is_ad:
+            _paste_icon(img, _load_icon("achievement", "AD徽章小图"), (bx, badge_y + 4, 64, 28))
+            bx += 70
+        if is_fc:
+            _paste_icon(img, _load_icon("achievement", "FC徽章小图"), (bx, badge_y + 4, 64, 28))
 
     # ---- 右下：单曲 rating ----
     if fitting and rec.get("fitting_rating") is not None:
