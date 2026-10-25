@@ -189,38 +189,18 @@ def _paste_icon(img: Image.Image, icon: Image.Image | None, box: tuple[int, int,
     img.paste(resized, (bx + (bw - nw) // 2, by + (bh - nh) // 2), resized)
 
 
-def _needs_two_lines(rec: dict) -> bool:
-    """该记录曲名是否需要两行（预判用，渲染时同样逻辑）"""
-    return False  # 占位：真实判断在渲染时由 _wrap_title 决定，这里保守返回 False 保持行高
-
-def _wrap_title(text: str, font, max_w: int, max_lines: int = 2) -> list[str]:
-    """曲名按像素宽度换行；最多 max_lines 行，超出末行加省略号。逐字符断行（适配中日文无空格）"""
+def _truncate(text: str, font, max_w: int) -> str:
+    """单行截断：超出可用宽度就在单元格结尾处截断并补省略号（不换行）"""
     if _text_w(text, font) <= max_w:
-        return [text]
-    lines, cur = [], ""
-    for ch in text:
-        if _text_w(cur + ch, font) > max_w:
-            lines.append(cur)
-            cur = ch
-            if len(lines) == max_lines:
-                break
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _text_w(text[:mid] + "…", font) <= max_w:
+            lo = mid
         else:
-            cur += ch
-    if len(lines) < max_lines and cur:
-        lines.append(cur)
-    # 超出：末行截断 + 省略号
-    if len(lines) == max_lines and (len(lines_ := lines) < 1 or _text_w(lines[-1], font) > max_w or _still_overflow(text, lines, font, max_w)):
-        last = lines[-1]
-        while last and _text_w(last + "…", font) > max_w:
-            last = last[:-1]
-        lines[-1] = last + "…"
-    return lines[:max_lines]
-
-
-def _still_overflow(original: str, lines: list[str], font, max_w: int) -> bool:
-    """判断是否还有未展示的文本（用于决定是否加省略号）"""
-    consumed = "".join(lines)
-    return len(consumed) < len(original)
+            hi = mid - 1
+    return (text[:lo] + "…") if lo > 0 else "…"
 
 
 def _text_w(text: str, font) -> int:
@@ -232,87 +212,113 @@ def _text_w(text: str, font) -> int:
 
 
 def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
-               rec: dict, cover: Image.Image | None, f_title, f_small, f_rating,
-               fitting: bool = False):
-    """新版式：曲绘 | 曲名 / 定数 / 评级+分数 ；底部 AD/FC 徽章 + 单曲 rating"""
-    diff = (rec.get("chart") or {}).get("difficulty", "invaded")
-    color = DIFF_COLORS.get(diff, (120, 120, 120))
+               rec: dict, cover: Image.Image | None, fonts: dict,
+               fitting: bool = False, rank: int = 0):
+    """单格版式（左立绘 + 右文字）：
+
+        ┌──────┬──────────────────────────────┐
+        │      │ #7  spellofchaos             │  ← 排位 + wiki_id
+        │ 曲绘 │ Spell of chaoS               │  ← 曲名（超宽截断）
+        │      │ 1,009,526                    │  ← 分数（大字）
+        │      │ 16.5 → 173.26  [评级][AD/FC] │  ← 定数 → rating + 图标
+        └──────┴──────────────────────────────┘
+    """
+    f_rankno = fonts["rankno"]
+    f_title = fonts["title"]
+    f_score = fonts["score"]
+    f_meta = fonts["meta"]
+
     chart = rec.get("chart") or {}
+    diff = chart.get("difficulty", "invaded")
+    color = DIFF_COLORS.get(diff, (120, 120, 120))
     score = int(rec.get("score") or 0)
 
-    # 卡片底 + 左侧色条
+    # 卡片底 + 左侧难度色条
     draw.rounded_rectangle([x, y, x + CELL_W, y + CELL_H], radius=12, fill=CARD_BG)
     draw.rounded_rectangle([x, y, x + 7, y + CELL_H], radius=3, fill=color)
 
-    # ---- 曲绘（144x144，垂直居中于上半区）----
-    CV = 144
-    cv_x = x + 18
-    cv_y = y + 16
+    # ---- 左：曲绘 ----
+    CV = 152
+    cv_x, cv_y = x + 20, y + 32
     if cover:
         img.paste(cover, (cv_x, cv_y))
     else:
         draw.rounded_rectangle([cv_x, cv_y, cv_x + CV, cv_y + CV], radius=8, fill=FALLBACK_COVER)
         cr = cv_x + CV // 2
-        draw.ellipse([cr - 12, cv_y + CV // 2 - 12, cr + 12, cv_y + CV // 2 + 12], fill=TEXT_DIM)
+        draw.ellipse([cr - 14, cv_y + CV // 2 - 14, cr + 14, cv_y + CV // 2 + 14], fill=TEXT_DIM)
 
-    # ---- 右侧文本区 ----
-    tx = x + 18 + CV + 18
-    right_pad = 18
-    text_w = CELL_W - (18 + CV + 18) - right_pad
+    # ---- 右：文字列 ----
+    tx = x + 20 + CV + 20
+    right_pad = 20
+    text_w = CELL_W - (20 + CV + 20) - right_pad
 
-    # 行1：曲名（可两行）
+    # 行1：#排位 + 空格 + wiki_id
+    wid = chart.get("wiki_id") or ""
+    head = f"#{rank}" if rank else "#--"
+    if wid:
+        head = f"{head}  {wid}"
+    draw.text((tx, y + 16), _truncate(head, f_rankno, text_w), fill=TEXT_DIM, font=f_rankno)
+
+    # 行2：曲名（单行，超出直接截断）
     title = chart.get("title") or "?"
     fit_mark = "*" if chart.get("fitting_rating") is not None and chart.get("fitting_level") is None else ""
-    lines = _wrap_title(f"{title}{fit_mark}", f_title, text_w, max_lines=2)
-    draw.text((tx, y + 14), lines[0], fill=TEXT, font=f_title)
-    title_rows = len(lines)
-    if title_rows > 1:
-        draw.text((tx, y + 42), lines[1], fill=TEXT, font=f_title)
+    draw.text((tx, y + 44), _truncate(f"{title}{fit_mark}", f_title, text_w), fill=TEXT, font=f_title)
 
-    # 行2：难度定数
-    lv_y = y + (14 if title_rows == 1 else 42) + 44
+    # 行3：分数
+    draw.text((tx, y + 80), _fmt_score(score), fill=TEXT, font=f_score)
+
+    # 行4：定数 → 单曲 rating，紧跟评级图标 + 成就图标（依次排布，不右对齐）
     if fitting and chart.get("fitting_level") is not None:
         lv = chart["fitting_level"]
     else:
         lv = chart.get("level") or 0
-    draw.text((tx, lv_y), f"{diff} {lv:g}", fill=color, font=f_small)
-
-    # 行3：评级标识 + 游玩分数
-    row3_y = lv_y + 40
-    grade_name = _grade_for_score(score)
-    rank_icon = _load_icon("rank", grade_name)
-    if rank_icon is not None:
-        _paste_icon(img, rank_icon, (tx - 2, row3_y - 6, 110, 39))
-        score_x = tx + 116
-    else:
-        # 无图标时退回文字评级
-        draw.text((tx, row3_y), grade_name, fill=ACCENT, font=f_small)
-        score_x = tx + 116
-    draw.text((score_x, row3_y + 2), _fmt_score(score), fill=TEXT_DIM, font=f_small)
-
-    # ---- 底部徽章行：AD / FC ----
-    badge_y = y + CELL_H - 62
-    lost = int(rec.get("_judge", {}).get("lost", 0)) if rec.get("_judge") else None
-    received = int(rec.get("_judge", {}).get("received", 0)) if rec.get("_judge") else None
-
-    # 仅在【有真实判定数据】时显示 AD/FC 徽章（避免无缓存用户被误导）
-    if lost is not None:
-        is_fc = lost == 0
-        is_ad = is_fc and (received or 0) == 0
-        bx = tx - 4
-        if is_ad:
-            _paste_icon(img, _load_icon("achievement", "AD徽章小图"), (bx, badge_y + 4, 64, 28))
-            bx += 70
-        if is_fc:
-            _paste_icon(img, _load_icon("achievement", "FC徽章小图"), (bx, badge_y + 4, 64, 28))
-
-    # ---- 右下：单曲 rating ----
     if fitting and rec.get("fitting_rating") is not None:
         rating = rec["fitting_rating"]
     else:
         rating = rec.get("rating") or 0
-    draw.text((x + CELL_W - right_pad, y + CELL_H - 40), _fmt_rating2(_rating_to_float(rating)),
-              fill=ACCENT, font=f_rating, anchor="ra")
+    meta = f"{lv:g} → {_fmt_rating2(_rating_to_float(rating))}"
+
+    row4_y = y + 148
+    ICON_H = 40
+    icon_y = row4_y - 6
+    cur_x = tx
+
+    # 文字：可用宽度预留两个图标位，避免图标被挤出版面
+    rank_icon = _load_icon("rank", _grade_for_score(score))
+    ach_icon, _ = _achievement_icon(rec)
+    reserve = 0
+    if rank_icon is not None:
+        reserve += int(ICON_H * rank_icon.width / rank_icon.height) + 14
+    if ach_icon is not None:
+        reserve += int(ICON_H * ach_icon.width / ach_icon.height) + 14
+
+    meta_txt = _truncate(meta, f_meta, max(40, text_w - reserve))
+    draw.text((cur_x, row4_y + 2), meta_txt, fill=color, font=f_meta)
+    cur_x += _text_w(meta_txt, f_meta) + 14
+
+    if rank_icon is not None:
+        rw = int(ICON_H * rank_icon.width / rank_icon.height)
+        _paste_icon(img, rank_icon, (cur_x, icon_y, rw, ICON_H))
+        cur_x += rw + 14
+
+    if ach_icon is not None:
+        aw = int(ICON_H * ach_icon.width / ach_icon.height)
+        _paste_icon(img, ach_icon, (cur_x, icon_y, aw, ICON_H))
+
+
+def _achievement_icon(rec: dict) -> tuple[Image.Image | None, str]:
+    """AD/FC 成就图标。AD 与 FC 是【覆盖关系】：AD 成立的曲目只显示 AD。
+
+    仅在有真实判定数据时显示（无缓存时返回空，避免误导）。
+    """
+    judge = rec.get("_judge")
+    if not judge:
+        return None, ""
+    if int(judge.get("lost", 0)) != 0:
+        return None, ""                              # 有 Miss：两者都不成立
+    if int(judge.get("received", 0)) == 0:
+        return _load_icon("achievement", "AD徽章小图"), "AD"
+    return _load_icon("achievement", "FC徽章小图"), "FC"
 
 
 def _render(sections: list[dict], username: str, nickname: str, total_rating: float,
@@ -324,10 +330,13 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
     f_sec = _font(33, bold=True)
     f_big = _font(56, bold=True)
     f_label = _font(21)
-    # 单元格字号：曲名 16*1.2≈19pt，其余 18/20 *1.5 = 27/30pt
-    f_cell_title = _font(19)
-    f_cell_small = _font(27)
-    f_cell_rating = _font(30)
+    # 单格字号
+    cell_fonts = {
+        "rankno": _font(21),          # #排位 + wiki_id
+        "title": _font(26),           # 曲名
+        "score": _font(38, bold=True),  # 分数（大字）
+        "meta": _font(24),            # 定数 → rating
+    }
 
     margin = 40
     header_h = 172
@@ -368,7 +377,8 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
                 row_y += CELL_H + GAP
             x = margin + col * (CELL_W + GAP)
             cover = covers.get((rec.get("chart") or {}).get("cover") or "")
-            _draw_cell(img, draw, x, row_y, rec, cover, f_cell_title, f_cell_small, f_cell_rating, fitting)
+            # 排位：本节内的序号（1-based），与图上展示顺序一致
+            _draw_cell(img, draw, x, row_y, rec, cover, cell_fonts, fitting, rank=i + 1)
         y += h
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
