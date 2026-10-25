@@ -103,7 +103,11 @@ from plugins.paradigm_score.core_loader import get_core
 core, src = get_core()
 expect = sys.argv[1]
 bot = Path(sys.argv[2])
-texts = {str(src): inspect.getsource(core.b50_render)}
+texts = {}
+for mod_name in ("b50_render", "prd_api", "prp_api"):
+    mod = getattr(core, mod_name, None)
+    if mod is not None:
+        texts[f"{src}\\{mod_name}"] = inspect.getsource(mod)
 plugin_file = bot / "plugins" / "paradigm_score" / "__init__.py"
 if plugin_file.exists():
     texts[str(plugin_file)] = plugin_file.read_text(encoding="utf-8")
