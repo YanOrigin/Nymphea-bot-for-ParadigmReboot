@@ -59,9 +59,17 @@ __plugin_meta__ = PluginMetadata(
 )
 
 # ---------- 存储 ----------
+# 锚定项目根目录（plugins/paradigm_score → 上两级），避免依赖进程 cwd
+_BOT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-_TOKEN_FILE = Path(config.paradigm_token_file)
-_SCORES_DIR = Path(config.paradigm_scores_dir)
+
+def _abs(p: str) -> Path:
+    q = Path(p)
+    return q if q.is_absolute() else (_BOT_ROOT / q)
+
+
+_TOKEN_FILE = _abs(config.paradigm_token_file)
+_SCORES_DIR = _abs(config.paradigm_scores_dir)
 
 
 def _load_tokens() -> dict:
@@ -422,6 +430,55 @@ def _parse_b50_args(raw: str) -> tuple[str, bool]:
     return mode, fitting
 
 
+def _build_judge_map(uid: str) -> dict[tuple[str, str], dict]:
+    """从本地游戏缓存建 (wiki_id, difficulty) → 判定数据 映射"""
+    cache_path = _user_score_file(uid)
+    if not cache_path.exists():
+        return {}
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    game_recs = cache.get("records", [])
+    if not game_recs:
+        return {}
+
+    _, manual = _load_song_kb()
+    slug_to_wid: dict[str, str] = dict(manual)  # slug -> wiki_id（人工映射表）
+
+    out: dict[tuple[str, str], dict] = {}
+    for r in game_recs:
+        cid = r.get("chart_id") or ""
+        parts = cid.split("/")
+        if len(parts) != 3:
+            continue
+        slug, diff = parts[1], parts[2]
+        wid = slug_to_wid.get(slug, slug)  # 大部分 slug == wiki_id
+        out[(wid, diff)] = {
+            "lost": int(r.get("lost_count") or 0),
+            "received": int(r.get("received_count") or 0),
+            "decrypted": int(r.get("decrypted_count") or 0),
+            "decrypted_plus": int(r.get("decrypted_plus_count") or 0),
+        }
+    return out
+
+
+def _attach_judge(sections: list[dict], judge_map: dict) -> int:
+    """把判定数据附加到 sections 里的记录上，返回成功关联的条数"""
+    if not judge_map:
+        return 0
+    hit = 0
+    for sec in sections:
+        for rec in sec.get("records", []):
+            chart = rec.get("chart") or {}
+            key = (chart.get("wiki_id") or "", chart.get("difficulty") or "")
+            judge = judge_map.get(key)
+            if judge:
+                rec["_judge"] = judge
+                hit += 1
+    return hit
+
+
 def _fetch_b50_sections(username: str, mode: str, fitting: bool) -> dict:
     """按 PRP 前端同款逻辑取数并分节（线程池执行）。
     - standard: scope=b50                     → B15(15)+B35(35)
@@ -490,6 +547,17 @@ async def handle_b50(event: MessageEvent, arg: Message = CommandArg()):
     sections = result["sections"]
     if not sections or all(not s["records"] for s in sections):
         await query_score.finish("PRP 云端没有你的成绩记录，请先 /传分 上传")
+
+    # 关联游戏侧判定数据，让 AD/FC 徽章精确（无缓存时渲染层退回分数推导）
+    try:
+        judge_map = await asyncio.to_thread(_build_judge_map, uid)
+        attached = _attach_judge(sections, judge_map)
+        if attached:
+            logger.info(f"b50 判定数据关联: {attached} 条")
+        else:
+            logger.info("b50 无判定数据可关联（游戏缓存缺失或谱面不匹配），徽章按分数推导")
+    except Exception as e:
+        logger.warning(f"b50 判定关联失败（不影响出图）: {e!r}")
 
     out = _SCORES_DIR / f"b50_{uid}_{mode}{'_fit' if fitting else ''}.jpg"
     title = f"Paradigm: Reboot B50{' · Fitted' if fitting else ''}"
@@ -668,8 +736,8 @@ _DIFF_ORDER = ("detected", "invaded", "massive", "reboot")
 
 
 # 曲库与别名库路径（与 alias_manager / song_query 共享同一批文件）
-_SONGS_FILE = Path("data/paradigm_songs.json")
-_ALIASES_FILE = Path("data/paradigm_aliases.json")
+_SONGS_FILE = _abs("data/paradigm_songs.json")
+_ALIASES_FILE = _abs("data/paradigm_aliases.json")
 
 
 def _load_song_kb() -> tuple[list[dict], dict]:
@@ -680,7 +748,7 @@ def _load_song_kb() -> tuple[list[dict], dict]:
         songs = []
     manual: dict = {}
     try:
-        mp = Path(config.prp_tables_dir or "data/prp_tables") / "slug_wiki_manual_map.json"
+        mp = _abs(config.prp_tables_dir or "data/prp_tables") / "slug_wiki_manual_map.json"
         if mp.exists():
             manual = json.loads(mp.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
@@ -861,7 +929,7 @@ async def handle_score(event: MessageEvent, arg: Message = CommandArg()):
     )
 
 
-_PRP_FILE = Path(config.prp_accounts_file)
+_PRP_FILE = _abs(config.prp_accounts_file)
 
 
 def _load_prp() -> dict:
@@ -886,9 +954,9 @@ def _save_prp(data: dict) -> None:
 
 
 def _get_chart_map() -> "core.prp_api.ChartMap":
-    tables = Path(config.prp_tables_dir) if config.prp_tables_dir else None
+    tables = _abs(config.prp_tables_dir) if config.prp_tables_dir else None
     return core.prp_api.ChartMap(
-        cache_file=Path(config.prp_chart_cache),
+        cache_file=_abs(config.prp_chart_cache),
         tables_dir=tables,
     )
 
