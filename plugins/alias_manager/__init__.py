@@ -5,6 +5,7 @@
     /别名添加 <曲名片段>                          引导式（会话：选序号 → 输别名）
     /别名查询 <曲名|wiki_id|别名>                 查看某曲已有别名（含投票进度）
     /别名投票 <别名>                              为待审核别名投票（3票进入开源库）
+    /别名删除 <别名>                              删除别名（多首命中时按序号选择）
     （会话中发送 /别名取消 放弃）
 
 机制：
@@ -12,11 +13,15 @@
     - 跨歌同名别名允许（玩梗自由）；查歌遇到多义别名列出候选
     - 进入开源库需 3 人投票；种子/历史别名视为已通过
     - 同歌重复拒绝；每人每日限额（默认 20）
+    - 删除会同时清理投票元数据，并写入墓碑表（data/alias_deleted.json），
+      使 alias_sync 把"主动删除"与"远端被篡改"区分开，不误判冲突
 
 别名库格式（data/paradigm_aliases.json）：
     { "<wiki_id>": ["别名1", ...] }  —— wiki_id 键控，即未来开源库格式
 投票元数据（data/alias_votes.json，仅本地，不上传）：
     { "approved": ["<wid>::<别名>", ...], "pending": {"<wid>::<别名>": {"voters": [...]}} }
+删除墓碑（data/alias_deleted.json，仅本地，不上传）：
+    { "deleted": ["<wid>::<别名>", ...] }  —— 防止已删别名被 alias_sync 重新推回
 """
 import json
 import re
@@ -42,6 +47,7 @@ __plugin_meta__ = PluginMetadata(
         "/别名添加 <曲名片段>（引导式）\n"
         "/别名查询 <曲名|wiki_id|别名>\n"
         "/别名投票 <别名>\n"
+        "/别名删除 <别名>（多首命中时按序号选择）\n"
         "会话中发送 /别名取消 放弃"
     ),
     type="application",
@@ -56,6 +62,7 @@ _DB_FILE = Path(config.alias_db_file)
 _SONGS_FILE = Path(config.alias_songs_file)
 _LIMIT_FILE = _DB_FILE.parent / "alias_daily_count.json"
 _VOTES_FILE = Path(config.alias_votes_file)
+_TOMB_FILE = _DB_FILE.parent / "alias_deleted.json"
 
 
 def _load_db() -> dict[str, list[str]]:
@@ -122,6 +129,22 @@ def _load_songs() -> list[dict]:
         return json.loads(_SONGS_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return []
+
+
+def _load_tomb() -> set[str]:
+    """已删除别名的墓碑（防止 alias_sync 把主动删除当成远端篡改）"""
+    try:
+        data = json.loads(_TOMB_FILE.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return set()
+    return set(data.get("deleted", []))
+
+
+def _save_tomb(tomb: set[str]) -> None:
+    _TOMB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _TOMB_FILE.write_text(
+        json.dumps({"deleted": sorted(tomb)}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def _normalize(s: str) -> str:
@@ -267,6 +290,7 @@ async def _commit_alias(matcher: Matcher, uid: str, song: dict, new_alias: str):
 alias_add = on_command("别名添加", rule=to_me(), priority=5, block=True)
 alias_query = on_command("别名查询", rule=to_me(), priority=5, block=True)
 alias_vote = on_command("别名投票", rule=to_me(), priority=5, block=True)
+alias_delete = on_command("别名删除", rule=to_me(), priority=5, block=True)
 alias_cancel = on_command("别名取消", rule=to_me(), priority=5, block=True)
 
 
@@ -468,5 +492,116 @@ async def handle_vote(event: MessageEvent, matcher: Matcher, arg: Message = Comm
 @alias_cancel.handle()
 async def handle_cancel():
     await alias_cancel.finish(
-        "已取消进行中的添加（如有会话）。\n如需新增别名：/别名添加 <锚点> <别名>"
+        "已取消进行中的操作（如有会话）。\n"
+        "增删别名：/别名添加 <锚点> <别名> · /别名删除 <别名>"
     )
+
+
+# ---------- 删除 ----------
+
+def _find_alias_hits(alias: str) -> list[tuple[str, str, str]]:
+    """按别名查找所有命中：返回 [(wiki_id, 库中原始别名, 曲名)]"""
+    nq = _normalize(alias)
+    db = _load_db()
+    titles = {s.get("wiki_id"): s["title"] for s in _load_songs() if s.get("wiki_id")}
+    hits: list[tuple[str, str, str]] = []
+    for wid, aliases in db.items():
+        for a in aliases:
+            if _normalize(a) == nq:
+                hits.append((wid, a, titles.get(wid, wid)))
+    return hits
+
+
+def _commit_delete(uid: str, wid: str, alias: str, title: str) -> str:
+    """真正执行删除：库 + 投票元数据 + 墓碑，返回给用户的说明"""
+    db = _load_db()
+    lst = db.get(wid, [])
+    kept = [a for a in lst if _normalize(a) != _normalize(alias)]
+    removed = len(lst) - len(kept)
+    if removed == 0:
+        return f"「{alias}」已不在「{title}」的别名中（可能刚被删除）"
+
+    if kept:
+        db[wid] = kept
+    else:
+        db.pop(wid, None)   # 该曲无别名了，整条移除（保持库整洁）
+    _save_db(db)
+
+    # 投票元数据同步清理，避免留下"已通过但库里没有"的僵尸白名单
+    votes = _load_votes()
+    key = _vote_key(wid, alias)
+    had_approved = key in votes["approved"]
+    if had_approved:
+        votes["approved"].remove(key)
+    votes["pending"].pop(key, None)
+    _save_votes(votes)
+
+    # 写墓碑：alias_sync 见到它就不会把这条再从 approved 推回远端
+    tomb = _load_tomb()
+    tomb.add(key)
+    _save_tomb(tomb)
+
+    note = ""
+    if had_approved:
+        note = "\n（该别名此前已进开源库，下次同步会一并从远端移除）"
+    left = len(db.get(wid, []))
+    return f"已删除：「{title}」←「{alias}」{note}\n（本曲剩余别名：{left}）"
+
+
+def _render_delete_candidates(alias: str, hits: list[tuple[str, str, str]]) -> str:
+    lines = [f"「{alias}」对应 {len(hits)} 首歌曲，请回复序号决定删除哪一首：", ""]
+    for i, (wid, a, title) in enumerate(hits, 1):
+        lines.append(f"{i}. {title}  [{wid}]")
+    lines.append("")
+    lines.append("发送 /别名取消 放弃")
+    return "\n".join(lines)
+
+
+@alias_delete.handle()
+async def handle_delete(event: MessageEvent, matcher: Matcher, arg: Message = CommandArg()):
+    uid = str(event.user_id)
+    alias = arg.extract_plain_text().strip()
+    if not alias:
+        await matcher.finish(
+            "用法：/别名删除 <别名>\n"
+            "（若该别名对应多首歌曲，会按序号列出供你选择）"
+        )
+
+    hits = _find_alias_hits(alias)
+    if not hits:
+        await matcher.finish(f"没有找到别名「{alias}」\n可用 /别名查询 <曲名> 查看某曲的全部别名")
+
+    if len(hits) == 1:
+        wid, a, title = hits[0]
+        await matcher.finish(_commit_delete(uid, wid, a, title))
+
+    # 多义：开会话让用户选序号
+    matcher.state["_phase"] = "pick_delete"
+    matcher.state["_hits"] = hits
+    matcher.state["_alias"] = alias
+    await matcher.send(_render_delete_candidates(alias, hits))
+    return
+
+
+@alias_delete.got("resp")
+async def continue_delete(event: MessageEvent, matcher: Matcher):
+    """删除会话：按序号选择要删除哪一首"""
+    uid = str(event.user_id)
+    state = matcher.state
+    text = str(matcher.get_arg("resp") or "").strip()
+
+    if text.startswith("/别名取消") or text == "别名取消":
+        await matcher.finish("已取消本次删除")
+
+    if state.get("_phase") != "pick_delete":
+        await matcher.finish("会话状态异常，请重新 /别名删除 <别名>")
+
+    if not text.isdigit():
+        await matcher.reject("请回复纯数字序号（或 /别名取消 放弃）")
+    hits: list[tuple[str, str, str]] = state.get("_hits") or []
+    idx = int(text) - 1
+    if not (0 <= idx < len(hits)):
+        await matcher.reject(f"序号超出范围（1-{len(hits)}），请重新回复")
+
+    wid, a, title = hits[idx]
+    await matcher.finish(_commit_delete(uid, wid, a, title))
