@@ -207,6 +207,22 @@ def hykb_refresh_session(credential: dict, device_id: str, timeout: int = 15) ->
 # ---------- 高层操作 ----------
 
 
+def _renew_session(creds: dict, device_id: str, timeout: int = 30) -> dict:
+    """按凭据类型静默续期 session。
+
+    - 击弦（iOS）：creds["jixian"] = {"phone","password"} → 手机号密码重新登录
+    - 快爆（安卓）：creds["hykb_credential"] → devsdk 换 access_token 再登录
+    两者都没有则抛 PrdAPIError（需要用户重新绑定）。
+    """
+    jx = creds.get("jixian")
+    if jx and jx.get("phone") and jx.get("password"):
+        return jixian_login(jx["phone"], jx["password"], device_id, timeout=timeout)
+    cred = creds.get("hykb_credential")
+    if cred:
+        return hykb_refresh_session(cred, device_id, timeout=timeout)
+    raise PrdAPIError("凭据已过期且无可用于自动续期的信息（请重新绑定账号）")
+
+
 def fetch_best(creds: dict, creds_saver=None, timeout: int = 30) -> list[dict]:
     """拉取全量成绩（每谱面最佳）。自动处理 session 轮换与静默续期。
 
@@ -216,8 +232,8 @@ def fetch_best(creds: dict, creds_saver=None, timeout: int = 30) -> list[dict]:
     - 严禁多账号共享 device_id（collaborator 警告：会被击弦网络封杀）
 
     凭据形态：支持有 session 的（直接用）与 credential-only 的（先静默换 session）。
+    续期来源：击弦用 jixian 手机号密码重登；快爆用 hykb_credential 换 token。
     """
-    _require_key()
     # device_id 终身固化：在任何请求前确定并持久化
     device_id = creds.get("deviceid") or str(uuid.uuid4())
     if creds.get("deviceid") != device_id:
@@ -225,13 +241,9 @@ def fetch_best(creds: dict, creds_saver=None, timeout: int = 30) -> list[dict]:
         if creds_saver:
             creds_saver(creds)
 
-    # credential-only：先静默换 session
+    # session 缺失：按类型静默换新
     if not creds.get("session"):
-        cred = creds.get("hykb_credential")
-        if not cred:
-            raise PrdAPIError("凭据缺少 session 且无 hykb_credential 可续期")
-        new = hykb_refresh_session(cred, device_id, timeout=timeout)
-        creds.update(new)
+        creds.update(_renew_session(creds, device_id, timeout=timeout))
         if creds_saver:
             creds_saver(creds)
 
@@ -244,16 +256,16 @@ def fetch_best(creds: dict, creds_saver=None, timeout: int = 30) -> list[dict]:
         try:
             client.call("/server/user/login", timeout=timeout)
         except PrdAPIError:
-            pass  # 预热失败不致命，主调用失败还有 credential 重试兜底
+            pass  # 预热失败不致命，主调用失败还有续期重试兜底
 
     try:
         data = client.call("/server/play/get_best", timeout=timeout)
     except PrdAPIError:
-        # Session 失效 → 有 credential 则静默换新再试一次（沿用同一 device_id）
-        cred = creds.get("hykb_credential")
-        if not cred:
-            raise
-        new = hykb_refresh_session(cred, device_id, timeout=timeout)
+        # Session 失效（401 等）→ 按凭据类型静默续期后重试一次（沿用同一 device_id）
+        try:
+            new = _renew_session(creds, device_id, timeout=timeout)
+        except PrdAPIError:
+            raise  # 无法自愈：把原始调用错误抛给上层
         creds.update(new)
         if creds_saver:
             creds_saver(creds)
