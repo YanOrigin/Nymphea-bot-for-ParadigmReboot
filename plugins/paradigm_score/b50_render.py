@@ -224,6 +224,7 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
         └──────┴──────────────────────────────┘
     """
     f_rankno = fonts["rankno"]
+    f_gap = fonts.get("gap") or f_rankno
     f_title = fonts["title"]
     f_score = fonts["score"]
     f_meta = fonts["meta"]
@@ -252,11 +253,24 @@ def _draw_cell(img: Image.Image, draw: ImageDraw.ImageDraw, x: int, y: int,
     right_pad = 20
     text_w = CELL_W - (20 + CV + 20) - right_pad
 
-    # 行1：#排位 + 空格 + wiki_id
+    # 行1：#排位 + 空格 + wiki_id（左侧）；右侧可挂冲分差距
     wid = chart.get("wiki_id") or ""
     head = f"#{rank}" if rank else "#--"
     if wid:
         head = f"{head}  {wid}"
+    gap = rec.get("_gap")
+    gap_txt = ""
+    if gap is not None:
+        nxt_name = rec.get("_band") or ""
+        gap_txt = f"差 {gap} 分" + (f" → {nxt_name}" if nxt_name else "")
+        # 冲分模式：曲名已承担识别作用，wiki_id 挤出宽度反而难看，只留排位
+        if wid:
+            head = f"#{rank}" if rank else "#--"
+    if gap_txt:
+        gap_w = _text_w(gap_txt, f_gap)
+        head = _truncate(head, f_rankno, max(60, text_w - gap_w - 16))
+        draw.text((x + CELL_W - right_pad, y + 18), gap_txt,
+                  fill=ACCENT, font=f_gap, anchor="ra")
     draw.text((tx, y + 16), _truncate(head, f_rankno, text_w), fill=TEXT_DIM, font=f_rankno)
 
     # 行2：曲名（单行，超出直接截断）
@@ -333,6 +347,7 @@ def _render(sections: list[dict], username: str, nickname: str, total_rating: fl
     # 单格字号
     cell_fonts = {
         "rankno": _font(21),          # #排位 + wiki_id
+        "gap": _font(19),             # 冲分差距（C50 用，比 wiki_id 略小）
         "title": _font(26),           # 曲名
         "score": _font(38, bold=True),  # 分数（大字）
         "meta": _font(24),            # 定数 → rating
