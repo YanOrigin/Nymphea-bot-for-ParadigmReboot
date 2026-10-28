@@ -887,7 +887,7 @@ async def handle_c50(event: MessageEvent):
         )
 
     prp = _load_prp().get(uid)
-    await c50_cmd.send("⏳ 正在统计冲分候选（离下一档最近的成绩）……")
+    await c50_cmd.send("⏳ 正在统计（离下一档最近的成绩）……")
 
     try:
         result = await asyncio.to_thread(_fetch_c50, uid, prp["username"] if prp else None)
@@ -923,19 +923,12 @@ async def handle_c50(event: MessageEvent):
 
     from nonebot.adapters.onebot.v11 import MessageSegment
 
-    # 区间分布概览（只列有命中的档位）
-    dist = " · ".join(
-        f"{name} {result['band_count'][name]}"
-        for _lo, _hi, _n, name in C50_BANDS
-        if result["band_count"].get(name)
-    )
-    head_lines = [f"📊 {title}", f"候选谱面：{result['candidates']} 个"]
+    head_lines = [f"📊 {title}"]
     if result["candidates"] > len(recs):
         head_lines.append(f"（按差距升序展示前 {len(recs)} 个）")
-    head_lines.append(f"区间分布：{dist}")
     closest = recs[0]
     head_lines.append(
-        f"最接近：{closest['chart']['title']} "
+        f"最可惜：{closest['chart']['title']} "
         f"差 {closest['_gap']} 分 → {closest['_band']}"
     )
     if result.get("no_rating"):
