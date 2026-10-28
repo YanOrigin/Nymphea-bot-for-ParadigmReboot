@@ -22,9 +22,9 @@ class Config(BaseModel):
     song_random_require_massive: bool = Field(
         default=False, validation_alias="song_random_require_massive"
     )
-    # 同一用户连续两次抽到同一首的规避：记住最近 N 首（0 = 不规避）
+    # 同一用户连续抽曲的规避窗口：记住最近 N 首（0 = 不规避）
     song_random_avoid_recent: int = Field(
-        default=10, validation_alias="song_random_avoid_recent"
+        default=3, validation_alias="song_random_avoid_recent"
     )
 
 
