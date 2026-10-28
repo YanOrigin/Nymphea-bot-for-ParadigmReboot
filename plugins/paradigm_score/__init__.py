@@ -111,6 +111,7 @@ fetch_scores = on_command("更新成绩", rule=to_me(), priority=5, block=True)
 query_score = on_command("b50", rule=to_me(), priority=5, block=True)
 ad50_cmd = on_command("ad50", rule=to_me(), priority=5, block=True)
 fc50_cmd = on_command("fc50", rule=to_me(), priority=5, block=True)
+c50_cmd = on_command("c50", rule=to_me(), priority=5, block=True)
 score_cmd = on_command("score", rule=to_me(), priority=5, block=True)
 
 
@@ -744,6 +745,217 @@ async def handle_ad50(event: MessageEvent):
 @fc50_cmd.handle()
 async def handle_fc50(event: MessageEvent):
     await _handle_judge50(event, "fc")
+
+
+# ---------- C50（冲分候选：离下一档最近的成绩） ----------
+
+# (区间下限, 区间上限, 下一档阈值, 档位名)
+# 只收「紧贴下一档、差一点就能升档」的分数段，其余段暂不统计
+C50_BANDS: list[tuple[int, int, int, str]] = [
+    (1009800, 1009999, 1010000, "MINF+"),
+    (998000, 999999, 1000000, "MINF"),
+    (988000, 989999, 990000, "MAAA+"),
+    (978000, 979999, 980000, "MAAA"),
+    (968000, 969999, 970000, "MAA+"),
+]
+C50_SHOW_LIMIT = 50   # 与 b50 一致的展示上限
+
+
+def _c50_band(score: int) -> tuple[int, str] | None:
+    """命中任一冲分区间则返回 (下一档阈值, 档位名)，否则 None"""
+    for lo, hi, nxt, name in C50_BANDS:
+        if lo <= score <= hi:
+            return nxt, name
+    return None
+
+
+def _c50_bands_text() -> str:
+    return " / ".join(f"{lo}~{hi}" for lo, hi, _n, _m in C50_BANDS)
+
+
+def _fetch_c50(uid: str, prp_username: str | None) -> dict:
+    """筛选冲分候选（线程池执行）
+
+    候选 = 本地缓存中落在 C50_BANDS 区间内的谱面，
+    按「距下一档还差多少分」升序（差得越少越靠前，越容易提升）。
+    """
+    cache_path = _user_score_file(uid)
+    if not cache_path.exists():
+        return {"records": [], "candidates": 0, "band_count": {}, "no_rating": 0, "closest": None}
+    cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    game_recs = cache.get("records", [])
+
+    songs, manual = _load_song_kb()
+    by_wid = {s.get("wiki_id"): s for s in songs if s.get("wiki_id")}
+
+    picked: list[dict] = []
+    band_count: dict[str, int] = {}
+    for r in game_recs:
+        score = int(r.get("score") or 0)
+        band = _c50_band(score)
+        if band is None:
+            continue
+        nxt, name = band
+        band_count[name] = band_count.get(name, 0) + 1
+        picked.append({"gap": nxt - score, "rec": r, "next": nxt, "band": name})
+
+    if not picked:
+        return {"records": [], "candidates": 0, "band_count": band_count,
+                "no_rating": 0, "closest": None}
+
+    # 差距小的优先；同差距时分数高的优先（更值得冲）
+    picked.sort(key=lambda x: (x["gap"], -int(x["rec"].get("score") or 0)))
+    shown = picked[:C50_SHOW_LIMIT]
+
+    # PRP rating（可选增强）
+    # PRP 单次最多返回 200 条且无翻页，按 rating 排序时高分谱面才在里面；
+    # C50 候选多为"差一点升档"的中段成绩，故再按 score 抓一次，两次取并集提升覆盖率
+    prp_ratings: dict[int, int] = {}
+    if prp_username:
+        try:
+            chart_map = _get_chart_map()
+            for sort_by in ("rating", "score"):
+                url = (f"{core.prp_api.PRP_BASE}/records/{prp_username}"
+                       f"?scope=best&page_size=500&sort_by={sort_by}&order=desc")
+                try:
+                    data = core.prp_api._get_json(url)
+                except Exception:
+                    continue
+                for x in data.get("records", []):
+                    pid = int((x.get("chart") or {}).get("id") or 0)
+                    if pid:
+                        prp_ratings.setdefault(pid, x.get("rating") or 0)
+            for idx, item in enumerate(shown):
+                item["_prp_rating"] = prp_ratings.get(
+                    chart_map.resolve(item["rec"].get("chart_id") or "") or 0
+                )
+        except Exception as e:
+            logger.warning(f"c50 rating 拉取失败（不影响出图）: {e!r}")
+
+    records, no_rating = [], 0
+    for idx, item in enumerate(shown):
+        r = item["rec"]
+        cid = r.get("chart_id") or ""
+        parts = cid.split("/")
+        diff = parts[2] if len(parts) == 3 else ""
+        slug = parts[1] if len(parts) == 3 else ""
+        wid = manual.get(slug, slug)          # 人工映射表修正 slug → wiki_id
+        song = by_wid.get(wid) or {}
+        rating = item.get("_prp_rating") or 0
+        if not rating:
+            no_rating += 1
+        records.append({
+            "score": int(r.get("score") or 0),
+            "rating": rating,
+            "chart": {
+                "id": 0,
+                "title": song.get("title") or wid or "?",
+                "cover": song.get("cover") or "",
+                "difficulty": diff,
+                "level": (song.get("levels") or {}).get(diff) or 0,
+                "wiki_id": wid,
+                "b15": False,
+            },
+            "_judge": {
+                "lost": int(r.get("lost_count") or 0),
+                "received": int(r.get("received_count") or 0),
+                "decrypted": int(r.get("decrypted_count") or 0),
+                "decrypted_plus": int(r.get("decrypted_plus_count") or 0),
+            },
+            "_gap": item["gap"],
+            "_next": item["next"],
+            "_band": item["band"],
+        })
+
+    return {
+        "records": records,
+        "candidates": len(picked),
+        "band_count": band_count,
+        "no_rating": no_rating,
+        "closest": shown[0]["gap"] if shown else None,
+    }
+
+
+@c50_cmd.handle()
+async def handle_c50(event: MessageEvent):
+    uid = str(event.user_id)
+
+    if not _user_score_file(uid).exists():
+        await c50_cmd.finish(
+            "C50 需要本地成绩缓存。\n"
+            f"请先 /更新成绩 拉取一次游戏成绩（之后 {config.fetch_cooldown // 3600} 小时内可直接查）"
+        )
+
+    prp = _load_prp().get(uid)
+    await c50_cmd.send("⏳ 正在统计冲分候选（离下一档最近的成绩）……")
+
+    try:
+        result = await asyncio.to_thread(_fetch_c50, uid, prp["username"] if prp else None)
+    except Exception as e:
+        logger.exception("c50 统计异常")
+        await c50_cmd.finish(f"❌ 统计异常：{e!r}")
+
+    recs = result["records"]
+    if not recs:
+        await c50_cmd.finish(
+            "你目前没有落在冲分区间内的成绩。\n"
+            f"（统计范围：{_c50_bands_text()}）"
+        )
+
+    sections = [{"label": f"C50 · 冲分候选（{len(recs)}/{result['candidates']}）",
+                 "avg": 0.0, "records": recs}]
+    out = _SCORES_DIR / f"c50_{uid}.jpg"
+    title = "Paradigm: Reboot C50"
+    try:
+        _qt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        img_path = await core.b50_render.render_b50_image(
+            prp["username"] if prp else uid,
+            (prp or {}).get("nickname") or (prp or {}).get("username") or uid,
+            sections, 0.0, title, out,
+            footer=f"距下一档最近的成绩 · {len(recs)} 条",
+            fitting=False,
+            query_time=_qt,
+            hide_total=True,
+        )
+    except Exception as e:
+        logger.exception("c50 渲染失败")
+        await c50_cmd.finish(f"❌ 报告渲染失败：{e!r}")
+
+    from nonebot.adapters.onebot.v11 import MessageSegment
+
+    # 区间分布概览（只列有命中的档位）
+    dist = " · ".join(
+        f"{name} {result['band_count'][name]}"
+        for _lo, _hi, _n, name in C50_BANDS
+        if result["band_count"].get(name)
+    )
+    head_lines = [f"📊 {title}", f"候选谱面：{result['candidates']} 个"]
+    if result["candidates"] > len(recs):
+        head_lines.append(f"（按差距升序展示前 {len(recs)} 个）")
+    head_lines.append(f"区间分布：{dist}")
+    closest = recs[0]
+    head_lines.append(
+        f"最接近：{closest['chart']['title']} "
+        f"差 {closest['_gap']} 分 → {closest['_band']}"
+    )
+    if result.get("no_rating"):
+        if prp:
+            head_lines.append(
+                f"（{result['no_rating']} 条未从 PRP 取到 rating，显示 0.00 —— "
+                f"该谱面可能未 /传分，或不在 PRP 前 200 条内）"
+            )
+        else:
+            head_lines.append(
+                f"（未绑定 PRP，{result['no_rating']} 条 rating 显示 0.00；"
+                f"/绑定prp <用户名> <上传token> 后可显示）"
+            )
+
+    await c50_cmd.finish(
+        Message([
+            MessageSegment.text("\n".join(head_lines) + "\n"),
+            MessageSegment.image(img_path.resolve().as_uri()),
+        ])
+    )
 
 
 # ---------- /score 单曲成绩（本地缓存） ----------
