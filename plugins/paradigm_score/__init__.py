@@ -752,7 +752,7 @@ async def handle_fc50(event: MessageEvent):
 # (区间下限, 区间上限, 下一档阈值, 档位名)
 # 只收「紧贴下一档、差一点就能升档」的分数段，其余段暂不统计
 C50_BANDS: list[tuple[int, int, int, str]] = [
-    (1009800, 1009999, 1010000, "MINF+"),
+    (1008500, 1008999, 1009000, "MINF+"),
     (998000, 999999, 1000000, "MINF"),
     (988000, 989999, 990000, "MAAA+"),
     (978000, 979999, 980000, "MAAA"),
@@ -767,10 +767,6 @@ def _c50_band(score: int) -> tuple[int, str] | None:
         if lo <= score <= hi:
             return nxt, name
     return None
-
-
-def _c50_bands_text() -> str:
-    return " / ".join(f"{lo}~{hi}" for lo, hi, _n, _m in C50_BANDS)
 
 
 def _fetch_c50(uid: str, prp_username: str | None) -> dict:
@@ -897,10 +893,7 @@ async def handle_c50(event: MessageEvent):
 
     recs = result["records"]
     if not recs:
-        await c50_cmd.finish(
-            "你目前没有落在冲分区间内的成绩。\n"
-            f"（统计范围：{_c50_bands_text()}）"
-        )
+        await c50_cmd.finish("你目前没有寸止的歌哦")
 
     sections = [{"label": f"C50 · 冲分候选（{len(recs)}/{result['candidates']}）",
                  "avg": 0.0, "records": recs}]
