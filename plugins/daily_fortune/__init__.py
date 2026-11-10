@@ -13,12 +13,14 @@
 import asyncio
 import json
 import random
+import time
 import urllib.parse
 import urllib.request
 from datetime import date, timedelta
 from pathlib import Path
 
 from nonebot import on_command
+from nonebot.log import logger
 from nonebot.rule import to_me
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 from nonebot.plugin import PluginMetadata
@@ -59,7 +61,16 @@ ESCAPE_EVIL_TEXT = "恭喜你脱离了凶，今天也干劲满满呢~"
 
 # ---------- 存储 ----------
 
-_DATA_FILE = Path(config.fortune_data_file)
+# 锚定 bot 根目录（plugins/daily_fortune → 上两级），避免依赖进程 cwd
+_BOT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _abs(p: str) -> Path:
+    q = Path(p)
+    return q if q.is_absolute() else (_BOT_ROOT / q)
+
+
+_DATA_FILE = _abs(config.fortune_data_file)
 
 
 def _load_data() -> dict:
@@ -80,7 +91,7 @@ def _save_data(data: dict) -> None:
 
 # ---------- 曲目库 ----------
 
-_SONGS_FILE = Path(config.fortune_songs_file)
+_SONGS_FILE = _abs(config.fortune_songs_file)
 
 
 def _load_songs() -> list[dict]:
@@ -164,23 +175,43 @@ def _song_text(song: dict) -> str:
 
 
 async def _download_cover(filename: str) -> Path | None:
-    """下载并缓存曲绘，返回本地路径；失败返回 None（线程池执行避免阻塞事件循环）"""
-    cover_dir = Path(config.fortune_cover_dir)
+    """下载并缓存曲绘，返回本地路径；失败返回 None（线程池执行避免阻塞事件循环）
+
+    失败重试：曲库 434 首而缓存只有几十个，抽到未缓存曲目的概率 >90%，
+    几乎每天都有人在"首次下载"。原实现一次失败就放弃，导致偶发无曲绘。
+    这里做 3 次重试（指数退避），并把成功数据先写临时文件再改名，
+    避免并发/中断留下半截文件污染缓存。
+    """
+    if not filename:
+        return None
+    cover_dir = _abs(config.fortune_cover_dir)
     local = cover_dir / filename
-    if local.exists():
+    if local.exists() and local.stat().st_size > 1000:
         return local
     url = config.fortune_cover_url + urllib.parse.quote(filename)
 
     def _fetch() -> Path | None:
-        try:
-            cover_dir.mkdir(parents=True, exist_ok=True)
-            req = urllib.request.Request(url, headers={"User-Agent": "NympheaBot/0.1"})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                data = r.read()
-            local.write_bytes(data)
-            return local
-        except Exception:
-            return None
+        cover_dir.mkdir(parents=True, exist_ok=True)
+        last_err = None
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "NympheaBot/0.1"})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    data = r.read()
+                # 内容校验：太小或不是图片头则视为失败（防止把错误页存成图）
+                if len(data) < 1000:
+                    raise ValueError(f"响应过小 ({len(data)}B)")
+                if not (data[:2] == b"\xff\xd8" or data[:8] == b"\x89PNG\r\n\x1a\n" or data[:4] == b"RIFF"):
+                    raise ValueError(f"非图片内容 ({data[:8]!r})")
+                tmp = local.with_suffix(local.suffix + ".part")
+                tmp.write_bytes(data)
+                tmp.replace(local)   # 原子替换
+                return local
+            except Exception as e:
+                last_err = e
+                time.sleep(1.5 * (attempt + 1))   # 1.5s / 3s / 4.5s
+        logger.warning(f"曲绘下载失败（3 次重试后放弃）{filename}: {last_err!r}")
+        return None
 
     return await asyncio.to_thread(_fetch)
 
